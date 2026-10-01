@@ -1,0 +1,5 @@
+# Build output and editor files
+__pycache__/
+*.pyc
+*.o
+*.ko

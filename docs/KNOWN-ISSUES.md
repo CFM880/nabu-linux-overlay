@@ -1,0 +1,441 @@
+# nabu Linux 已知问题与待办
+
+小米平板 5（nabu，SM8150）Linux 支持的问题清单，按严重程度排序。
+内容来自各模块仓库的 README / docs 与 git 历史，是**基于证据的快照**；
+若某条已在后续提交中解决，请更新对应条目而不是删除。
+
+- 生产内核：`6.14.11-nabu1`（`nabu-main/repos.lock` 锁 `linux-6.14` @ `5181e135`）
+- 模块：`nabu-iris` / `nabu-camera` / `nabu-audio` / `nabu-accelerometer` / `nabu-power`
+- 用户态硬解：`iris-vaapi`
+- 维护者记录：`nabu-main/README.md`、各模块 `README.zh.md`、`iris-vaapi/docs/`
+
+---
+
+## 优先级待办
+
+| 优先级 | 问题 | 影响面 | 证据 |
+|---|---|---|---|
+| P0 | 中断解码会话楔死固件 → **已修复并实机验证**（2026-09-21 Fluster 全量不重载跑通） | 硬解稳定性、测试可信度 | `nabu-iris` 6 文件、`benchmark-results/fluster-full-postfix.md` |
+| P0 | WCD934x TX5/TX6 FIFO overflow/underflow → **已修复并验证** | 录音时序 | `nabu-audio` `wcd934x.c`、3.2 |
+| P0 | 启动偶发无声卡（SLIM NGD QMI 1 秒超时）→ **已修复并验证** | 音频可用性 | `nabu-audio` `qcom-ngd-ctrl.c`、3.1 |
+| P0 | 生产配置对 `qcom_iris` 自相矛盾 → **已修复**（统一到 nabu-main，只屏蔽 `venus_core`） | 部署一致性 | `nabu-accelerometer` `config/production.cmdline`、README |
+| P1 | suspend → 内核 PM 已修复；`c8c000.serial` 虚假唤醒**已修**（s2idle 能保持）；**但 resume 后 SLPI 仍会（低概率）崩溃 → `iio-sensor-proxy` 段错误、传感器/旋转失效（2.3，未解决）** | 待机功耗、稳定性 | `nabu-iris` `72077a2`、2.1/2.3 |
+| P1 | VP9 动态分辨率 → **V4L2 已修（8 对齐高度仍受限）** | 硬解正确性 | `iris-vaapi/benchmark-results/vp9-v4l2-resize.md`、1.2 |
+| P1 | 无串口/USB console 恢复通道 | 排障、变砖恢复 | `nabu-iris` `e23405e` 被 `239f933` revert |
+| P1 | 相机无完整 3A/通用拍照集成（Snapshot 已移除） | 相机可用性 | `nabu-camera` `40a5620` |
+| P1 | suspend/resume → **已验证**；显示链路 **已验证（无 HDR 通路）** | 回归风险 | 2.1、8 |
+| P1 | s2idle resume 后 SLPI 复位 → 传感器/旋转失效 **已修**（挂起前停 `hexagonrpcd`，`nabu-accelerometer` `215eb57`）；`c8c000.serial` 虚假唤醒亦已修 | 可用性、待机 | 2.3 更新、`nabu-accelerometer` `215eb57`/`8a84037` |
+| P2 | 充电硬限制（电荷泵温度窗、仅 A 口 QC、无 PD/PPS、电池 profile 单一） | 充电体验 | `nabu-power/README.zh.md` |
+| P2 | 6.18 移植存在但未成为受支持配置 | 内核升级 | `linux-6.18/`、`repos.lock` |
+| P2 | 传感器仅导出桌面子集 → **陀螺仪/原始磁力计已导出（D-Bus）** | 功能覆盖 | `nabu-accelerometer/README.md`、7 |
+| P2 | Fluster 能力边界（tiny/422/444/交错/>8192） | 硬解覆盖 | `fluster-full.md:86`、`nabu-iris/docs/fluster-debug.md` |
+
+---
+
+## 1. 视频硬解（Iris / VA-API）
+
+### 1.1 中断会话楔死固件（P0，代码已修，待实机验证）
+- **现象**：会话被中断/异常结束后，后续所有会话报 `SESSION_INIT -110` 或
+  `output VIDIOC_REQBUFS failed: I/O error`，直到 `modprobe -r/modprobe qcom_iris`。
+- **影响**：播放器异常退出、测试失败都会污染后续结果；Fluster 完整套件必须
+  **每个 pass 之间重载模块**才有干净数字。
+- **证据**：`iris-vaapi/docs/fluster.md`、`benchmark-results/fluster-full.md:43`。
+- **根因（2026-09-21 定位）**：原恢复逻辑只在「session error / unsupported stream」
+  两类事件上置位，且只在 `iris_close()` 时执行；以下路径不会触发恢复：
+  1. `SESSION_INIT` 超时：`iris_hfi_session_open()` 直接返回，漏清
+     `hfi_session_opened` 且不请求恢复，使核心永久被占；
+  2. 其它命令（streamon/stop/flush）超时虽把实例置 ERROR，但没有统一请求恢复；
+  3. 长生命周期 fd（如浏览器/VA context）只做 streamoff、不 close，
+     `iris_run_pending_core_recovery()` 永不执行；
+  4. `iris_core_init()` 失败后核心停在 `IRIS_CORE_ERROR`，之后每次 init 都 `-EINVAL`。
+- **修复（nabu-iris，未提交）**：
+  - 在唯一的 `IRIS_INST_ERROR` 入口 `iris_inst_change_state()` 统一置位
+    `recovery_pending`（覆盖所有 fatal 路径）；
+  - `iris_request_core_recovery()` 改为无锁 `WRITE_ONCE`，可从持有 `core->lock`
+    的 SYS_ERROR 路径调用；
+  - `iris_hfi_session_open()` 失败/超时时请求恢复并释放槽位，不再泄漏
+    `hfi_session_opened`；`iris_hfi_session_close()` 失败时也请求恢复；
+  - 新增 `iris_core_recover()`（deinit+init），`iris_open()` 检测到
+    `IRIS_CORE_ERROR` 时自动 power-cycle；
+  - 在 `iris_hfi_session_open()` 开头执行挂起的恢复，使长生命周期 fd 在下一个
+    会话开始前从干净 VPU 启动，无需重载模块；
+  - `sys_error_handler` 完成 power-cycle 后清除 pending，避免重复。
+- **验证状态（2026-09-21 已实机验证）**：安装新模块（build-id 与构建产物一致）
+  后重启，跑 Fluster 完整四套、**pass 之间未重载模块**：
+  - 所有 pass 均跑到完整分母（H.264 135、HEVC 147、VP9 305、VP9-HIGH 6），
+    不再中途 EIO 中止；
+  - VA-API 数字与「每次重载」基线完全一致（H.264 97、HEVC 130、VP9 174、
+    VP9-HIGH 2）；V4L2 同量级（H.264 111、HEVC 128、VP9 176）；
+  - 内核日志出现 3 次 `entered ERROR` → `power-cycling core after fatal session
+    error`，每次约 40ms 后固件重新 boot，之后测试继续；
+  - 全程无 `timed out waiting for HFI system response` / core init 失败。
+  - 结果与日志见 `iris-vaapi/benchmark-results/fluster-full-postfix.md`。
+- **遗留**：V4L2 路径相对旧基线小降（H.264 116→111、HEVC 130→128，多出若干
+  `Error`），是否为 power-cycle 时序或运行波动待查；会话内部一旦内部解码错误，
+  同一码流后续包会持续 EIO（per-vector，跨 vector 不再污染）。
+- **相关历史**：`dd5ff82`、`e32ecfc` 为此前的部分修复。
+
+### 1.2 VP9 动态分辨率（P1，V4L2 主体已修复，8 对齐高度仍受限）
+- **现象**：VP9 变尺寸码流（如 1280x720 → 640x360）的逐帧可见尺寸没有正确传到前端；
+  V4L2 直通路径需人工裁剪才能与软解一致，VA-API 路径已修复。
+- **证据**：`fluster-extended.md:78`、`:152`；固件 `FILL_BUFFER_DONE` 的
+  frame_width/height 未被处理函数读取。
+- **根因（2026-09-22 硬件确认）**：`VIDEO.IR.1.2` 对「现有 CAPTURE 分配已足够」的
+  in-place resize **不发** `HFI_EVENT_SESSION_SEQUENCE_CHANGED`，且**不实现**
+  `HFI_PROPERTY_PARAM_VDEC_ENABLE_SUFFICIENT_SEQCHANGE_EVENT`（只有 `SEQCHNG_AT_RAP`），
+  所以此前的属性实验失败是固件不支持，不是 host 端 bug。固件字符串
+  `Seq changed at INTER frame. Not calling update ds info. We will continue to use
+  old values for now.` 表明它保留 OUTPUT2 配置；此时 host 侧 FLUSH/reinit 会让固件
+  assert（`sys error` + `session error 0x1004` + 自动 power-cycle，已实测）。固件只在
+  每帧 `FILL_BUFFER_DONE` 里给出可见矩形（frame_width/height + origin）。
+- **修复（`nabu-iris` + FFmpeg V4L2 m2m 客户端）**：
+  - 驱动在 FTB 检测 VP9 可见矩形**缩小**（legacy VPU5、首个 IPSC 之后、非 DRC），
+    更新 `crop` 并发 `V4L2_EVENT_SOURCE_CHANGE`，但**不改 CAPTURE 格式**（避免客户端
+    重分配、避免触发固件 assert）；
+  - 每个 CAPTURE buffer 记录自己的可见矩形，`iris_vb2_buf_finish()` 在出队时通过
+    `G_SELECTION` 暴露（legacy VP9 会延迟一帧输出，必须 per-buffer，否则前退一帧）；
+  - FFmpeg 客户端在 DQBUF 后查 `G_SELECTION` 并按可见矩形裁剪（不改 stride/缓冲），
+    即 V4L2 语义下的「客户端裁剪」。
+- **验证（2026-09-22）**：`vp90-2-21-resize_inter_1280x720_5_1-2` 连续 3 次
+  **30/30 帧与软件逐字节一致**（`dac2d22f…`）；`resize_inter` 变体中所有「缩小后高度
+  为 8 的倍数」的 8 个向量均逐字节一致；回归无下降（H.264 1/1、VP9 1/1、VP9-HIGH
+  0/1），且客户端 HEVC smoke 由 1/2 提升到 2/2。详见
+  `iris-vaapi/benchmark-results/vp9-v4l2-resize.md`。
+- **遗留（固件限制）**：固件把输出高度向上取整到 8（180→184、540→544、90→96），且
+  FBD 没有其它 render-height 字段；缩小后高度非 8 倍数的向量（320x180、640x360、
+  960x540 等）仍只能拿到对齐值。彻底解决需内核解析 VP9 头或改固件。
+- **相关历史**：`vp9-context-continuation.md`（VA-API 修复）。
+
+### 1.3 能力边界（P2）
+- VP9 160x90 因最小可见高度失败（160x96 通过）——`nabu-iris/docs/fluster-debug.md:32`。
+- 高度 >8192 直接不支持（`fluster-full.md`）。
+- `tiny(<64)`、4:2:2/4:4:4、10/12-bit 组合、场/交错工具在硬件路径 Fail/Error。
+
+### 1.4 其他硬解限制
+- HEVC canonical SPS **不支持 long-term reference table**；自定义 scaling list 未序列化
+  （`iris-vaapi/docs/development-notes.md:250`）。
+- **单引擎单实例**，不支持并发多视频流（同上 `:356`）。
+- stock FFmpeg 的 `hevc_v4l2m2m` / `vp9_v4l2m2m` 不为 10-bit 输入选 P010，需自编译 FFmpeg。
+- XPU 稳定 surface 每帧一次 CAPTURE→DMA-BUF CPU 拷贝是默认路径；Vulkan copy 仍属实验，
+  且会引入 Turnip 内存开销。
+- Chrome 153 HEVC seek 显示 seek 前旧帧为 Chromium 回归（`ExtendedVideoBitstreamValidation`），
+  需 `--disable-features` 规避。
+- **seek 残留帧结论**：在「不动 Chromium、只改通用 VA 驱动/内核」约束下无解，根因在
+  Chromium frame-pool/合成器（`iris-vaapi/docs/seek-debug.md:317`）。
+
+---
+
+## 2. 系统挂起 / VPU 电源（P1，suspend 已修复并验证）
+
+### 2.1 suspend 致命错误（已修复并验证）
+- **历史**：`iris_vpu_prepare_pc()` 对 legacy VPU5 返回 `-EAGAIN` 以保持供电，但系统睡眠
+  经 `pm_runtime_force_suspend()` 复用该回调，把非零当致命，**每次 suspend 以 -11 中止**；
+  9/16 由 PR #2（`nabu-iris` `ea7b52f` / `42085a8`）绕过：VPU5 上直接返回成功、
+  resume 不再重跑 power-on/固件重启。
+- **回归（2026-09-22 实测复现）**：9/19 的 idle power collapse（`c45c31f`）重写了
+  `iris_hfi_pm_suspend()`，丢掉了 VPU5 绕过。当 VPU 已被 idle work 收起
+  （`vpu_suspended=true`）时，suspend 仍对**已断电**的硬件调用 `iris_vpu_prepare_pc()`，
+  读回 “CPU not idle” 后转为 `-EAGAIN`，`dpm_run_callback()` 报 -11 中止 s2idle。
+- **修复（`nabu-iris`）**：`vpu_suspended` 已置位时直接返回成功；legacy VPU5 上
+  `prepare_pc` 失败按“保持供电”处理（s2idle 不掉电），不再中止挂起。
+- **验证（2026-09-22，安装模块 build-id `b93737b7`）**：
+  `rtcwake -d rtc1 -m freeze` 连续 **5 个 s2idle 周期（5 entry / 5 exit）无
+  `failed to suspend/resume`**；偶数周期后跑 VP9 resize 向量逐字节通过
+  （`dac2d22f…`）；随后再 3 周期复验无失败。`mem_sleep` 仅 `[s2idle]`。
+  resume 时若 VPU 此前已收起，会重新上电并 boot 固件（约 1s），之后 idle work 再次收起。
+
+### 2.2 真正电源管理仍不完整
+- VPU5 上 **runtime PM 被 `pm_runtime_forbid()` 禁用**，仅靠延迟 work「idle power collapse」
+  （`c45c31f`）在最后一个会话关闭且 2 秒无输入后收起 VPU；idle 与系统挂起路径共用
+  `iris_vpu_prepare_pc()` / `iris_vpu_power_off()`。
+- **故意省略 legacy Venus AXI halt**：`0xaa80208` 的 VBIF 寄存器会触发同步外部中止。
+- **待优化**：resume 后对“挂起前就已收起”的 VPU 会多做一次固件 boot（约 1s），
+  可用“是否本次挂起才断电”的标志避免；有会话打开时 s2idle 保持供电（可接受），
+  runtime PM 仍未接管。
+- **稳定性备注**：一次实验性 `power_collapse=0` 测试触发 VPU `SESSION_INIT` 超时
+  （-110，已由自动 power-cycle 恢复），随后 SLPI 传感器 DSP 连续 `USER-PD DOG`
+  崩溃导致整机卡死需硬重启；与 suspend 回调无关，但说明 SLPI/传感器仍有稳定性风险
+  （另见第 7 节）。
+
+### 2.3 s2idle resume 后 SLPI 崩溃 → 休眠后屏幕无法唤醒（P1，未解决）
+- **现象（2026-09-23 实机）**：做一次 `s2idle` 后按电源键，屏幕完全没有反应，
+  只能长按电源键硬重启。
+- **根因（日志已定位）**：`PM: suspend exit` 的**同一秒**SLPI 被复位
+  （`crash #1`），随后 PDR 注册丢失，传感器进程初始化卡死并被看门狗击杀，
+  进入 **每 40 秒一次**的崩溃循环：
+  ```
+  13:05:17 PM: suspend entry (s2idle)
+  13:05:24 PM: suspend exit
+  13:05:24 remoteproc0: crash detected in slpi: type fatal error   <- crash #1
+  13:05:24 PDR: service lookup for tms/servreg failed: -6
+  13:06:04 qmi_decode_string_elem: String len 128 >= Max Len 65
+  13:06:04 failed to decode incoming message
+  13:06:04 qcom_q6v5_pas: fatal error: ... USER-PD DOG detects stalled initialization
+  13:06:04 crash detected in slpi ... crash #2        <- 之后每 40s 重复
+  ```
+- **证据**：`nabu-main/artifacts/diagnostics/slpi-crash-after-s2idle-20260923.log`
+  （含 resume 时序、crash #1..#12、PDR -6 与 40s 周期）。
+- **对比**：同一内核的其它启动若**不做 suspend**，SLPI 完全健康（0 崩溃，四路
+  remoteproc running）。因此触发条件是 **s2idle 往返 + SLPI/GLINK/PDR**，与内核改名、
+  模块拆分、显卡/面板无关。
+- **与 2.2 的关系**：此前记录的 `USER-PD DOG` 卡死（USB console 实验那次，`crash #14`）
+  是同一故障模式的另一次触发。
+- **影响**：suspend 实际上是**不可用**的——一旦挂起就必须硬重启，所以 2.1 的
+  “suspend 已修复”只覆盖了内核 PM 路径，没有覆盖 SLPI。
+- **下一步（未执行）**：先停 `hexagonrpcd`/`iio-sensor-proxy` 再测 s2idle，判断是
+  传感器服务与 GLINK 的交互还是 SLPI 固件自身；再考虑 suspend 前主动释放 SLPI/QRTR
+  或在 resume 后重放 PDR 注册。
+- **更新（2026-09-30，7.2.7 `#84` 实机）：仍然存在——低概率，且与「挂起时传感器是否在持续流」有关。**
+  - 代理**空闲**时（无客户端真正 claim、SLPI 无持续 QMI 流）连续 **6 次** `rtcwake -d rtc1 -m freeze`
+    （10–18s）**0 次崩溃**，四路 remoteproc running，显示每次 resume 正常 unblank。
+  - 但用 `monitor-sensor` **持续读罗盘/光感**后再挂，resume 时**复现**（13:53:07）：
+    ```
+    PM: suspend exit
+    remoteproc0: crash detected in slpi: type fatal error
+    remoteproc0: recovering slpi
+    iio-sensor-proxy.service: Main process exited, code=dumped, status=11/SEGV
+    iio-sensor-proxy.service: Failed with result 'core-dump'.
+    hexagonrpcd.service: Deactivated successfully.
+    ```
+    之后 SLPI 又进入每 ~40s 的崩溃循环（13:53:47 再现一次）。
+  - 之后再跑 7 个 cycle（其中 3 个边流边挂）未再崩 → **竞态/低概率，不是每次必现**；所以 6.14 那条
+    证据在 7.2.7 上**没有被真正修掉**。
+  - **后果：息屏挂起会让传感器/自动旋转失效**。崩溃后 `iio-sensor-proxy` 没有 `Restart=`，停在
+    failed、`net.hadess.SensorProxy` 名字消失；即便不崩，`hexagonrpcd` 也会在挂起时退出而没人拉起。
+  - 上游 `hexagonrpcd-suspend/resume.service` 带 `ConditionFirmware=device-tree-compatible(qcom,sdm670)`，
+    nabu 是 SM8150 → **这两个 hook 从来没在 nabu 上跑过**（即使跑，也只 stop/start 守护进程，
+    不解决 SLPI 崩溃）。
+- **s2idle 真正的阻塞点另有其人：`c8c000.serial` 的虚假唤醒。** SM8150 GENI 调试 UART
+  （`c8c000.serial`）注册了唤醒 IRQ，但端口未接、RX 悬空，唤醒会虚假触发，把 s2idle 在 **~1s**
+  内打断（`pm_wakeup_irq=176`、`msmgpio 46 c8c000.serial:wakeup`）。表现是 `PM: suspend entry/exit`
+  都出现、但**根本没睡着** —— 所以 2.1 的“5 个周期无失败”其实是**快速弹跳**，并不省电，
+  也解释了“suspend 了但耗电没降”。
+  - 隔离实测：serial 开 + rtc-efi 关 → 1s 醒；serial 关 + rtc-efi 开 → 完整 10s 保持。
+    即 **只有 UART 需要处理**。
+  - 修复：`nabu-platform` 新增 `config/99-nabu-serial-wakeup.rules`
+    （`ACTION=="add", SUBSYSTEM=="platform", KERNEL=="c8c000.serial", ATTR{power/wakeup}="disabled"`），
+    并在 `nabu-module.toml` 的 `[install]` 安装到 `/etc/udev/rules.d/`。装了之后 s2idle 能保持
+    整个 RTC 闹钟时长（15–18s）。
+- **根因已定位并修复（`nabu-accelerometer` `215eb57`，2026-09-30）**：只要**传感器在持续流数据**，
+  每次挂起时 SLPI 的 `sensor_process` 都会在 **FastRPC 路径**崩溃（发生在 AP 还处于挂起状态时）：
+  ```
+  PDM: service 'sensor_process' crash: 'EX:sensor_process:0x1:frpc_dsp:0x6d:PC=...'
+  remoteproc0: crash detected in slpi: type fatal error
+  ```
+  这个复位让 `iio-sensor-proxy` 退出（`No sensors or missing kernel drivers`）或 SEGV；proxy 每次
+  重启都丢 `net.hadess.SensorProxy` → Mutter 丢 claim → 旋转消失。
+  - **发现**：`libssc` 用 **QRTR** 直连 SLPI，sensors PD attach 之后**不需要 FastRPC**。挂起前停掉
+    `hexagonrpcd`（FastRPC 服务）后，传感器数据照流、proxy 不退出，DSP 也没有会崩的 FastRPC 会话。
+  - **修复**：新增 `nabu-sensors-suspend.service`（`Before=suspend.target`）停 `hexagonrpcd`，
+    `nabu-sensors-resume.service`（`After=suspend.target`）再起；**`iio-sensor-proxy` 全程不动**，
+    所以 D-Bus 名字 / Mutter 的 claim 不丢。
+  - **验证**（带传感器流 + `systemctl suspend`，4 个 cycle）：**SLPI 0 崩溃、`iio-sensor-proxy` 0 重启、
+    数据流连续、`AccelerometerOrientation` resume 后仍有效**。
+- **兜底（`nabu-accelerometer` `8a84037`）**：`iio-sensor-proxy` 加 `Restart=on-failure`（2s）+ resume
+  hook 的 start-if-not-active。即使 SLPI 仍偶发复位、proxy 真死了也能自动拉起（光感/罗盘恢复；
+  Mutter 若已丢 claim 需重新登录）。
+- **待办**：这是「避免触发」，不是修固件；FastRPC/s2idle 的固件层根因仍在。s2idle 现在可放心用，
+  但建议先手动验证一次真实用户流程（熄屏→唤醒→旋转）再开自动挂起。待机功耗量化仍受限于
+  `qcom-battery` 无 `charge_counter`/`energy_now`。
+
+
+---
+
+## 3. 音频（P0/P2）
+
+### 3.1 启动偶发无声卡：SLIM NGD QMI 超时（P0，根因已定位，修复待多次重启确认）
+- **现象**：某些启动后 `/proc/asound/cards` 为空、`arecord -l` 无设备，
+  `snd_soc_wcd934x` 不加载，整机无声。
+- **证据**（`journalctl -b -k`）：
+  ```
+  qcom,slim-ngd-ctrl 171c0000.slim-ngd: QMI wait timeout
+  platform sound: deferred probe pending: snd-sm8150: SLIM Capture 1: codec dai not found
+  ```
+- **根因（2026-09-22，与 Android 对比确认）**：mainline
+  `qcom_slim_ngd_up_worker()` 只用
+  `wait_for_completion_interruptible_timeout(&ctrl->qmi_up, 1s)`，超时就
+  `QMI wait timeout` 并**返回、不重试**；若 QMI 服务 1–2 秒后才到，SLIM 控制器
+  永不注册 → WCD934x 不枚举 → 无声卡。Android/vendor 的 `ngd_dom_up()` 用的是
+  **无限** `wait_for_completion_interruptible(&dev->qmi_up)`。
+- **对比数据**：正常启动里 `SLIM controller Registered` + `WCD934x chip id` 都出现，
+  之后那条 `QMI wait timeout` 是多余的第二次 worker；失败启动里唯一一次 worker
+  超时后不再有任何注册活动。
+- **修复（未提交）**：`nabu-audio` 新增 `kernel-overlay/drivers/slimbus/qcom-ngd-ctrl.c`，
+  把 worker 改为无限等待（对齐 Android）；`nabu-module.toml` 增加
+  `slim-qcom-ngd-ctrl.ko` 的 build/artifact/install。已交叉编译通过
+  （build-id `1f1bfd00…`）。
+- **验证状态（2026-09-22 三次连续启动）**：`SLIM controller Registered` +
+  `WCD934x chip id` 均正常、无 `QMI wait timeout`、`/proc/asound/cards` 每次都有
+  `X5`、采集非静音。已修复。
+- **影响**：修复前可能每次冷启动随机丢音频；FIFO 修复也因此无法稳定验证。
+
+### 3.2 WCD934x TX5/TX6 FIFO overflow/underflow（P0，已修复并验证）
+- **现象**：录音 `drop` 后约 1.3–1.7 ms 出现 `overflow error on TX port 6`，与
+  `Port Closed TX5/TX6` 同时；驱动对日志限速并在 FIFO 错误后屏蔽中断。
+- **根因**：`wcd934x_trigger()` 在 STOP 时只调用 `slim_stream_disable/unprepare`
+  拆掉 SLIM 通道，**没有先关闭 codec 侧 TX 端口**，于是抽取器在通道被移除后继续
+  写端口 FIFO，产生 overflow。
+- **修复（已提交）**：STOP 时先写 `SLAVE_PORT_DISABLE`，并用 `port_disabled` 标志
+  保证只在“确实被禁用过”时于 START 重新使能（避免首次 START 的多余写复位 FIFO）；
+  涉及 `kernel-overlay/sound/soc/codecs/wcd934x.c`。
+- **验证（`probe-capture-lifecycle.py --cycles 3`）**：两次运行 overflow 均为
+  **0**（基线 2）；12 次采集中有 1 次 `underflow on TX5` 瞬态，发生在首次
+  `hw_params` 阶段（原始代码同样在此写端口使能），第二次运行 0 次；采集数据始终
+  完整、非静音。
+- **codec-port-log 模块**（仅把 PORT_CLOSED 降为 debug）仍未安装/重启验证
+  （`README.zh.md:230`）。
+
+### 3.3 其他音频限制（P2）
+- PCM 映射失败靠**多分配一页**规避，依赖特定 DSP 地址窗口，512 KiB 映射仍脆弱
+  （`README.zh.md:111`）。
+- **不要热卸载音频模块或重绑 APR**：会丢失 APR 服务注册/GLINK 重复设备，
+  必须重启才能恢复（`README.zh.md:137`）。
+- 采样对齐修复仅在 nabu + `audio1` 内核验证，未覆盖其他 Qualcomm 设备
+  （`README.zh.md:169`）。
+
+---
+
+## 4. 恢复 / 调试通道（P1）
+
+- 曾加入 USB CDC-ACM 控制台 gadget 以抓 VPU hang 日志（`nabu-iris` `e23405e`），
+  同日被 revert（`239f933`），原因未记录。
+- 当前 production cmdline 只有 `console=tty0`，**没有串口/USB console 兜底**，
+  设备卡死时难以抓取内核日志。
+- production cmdline 使用 `fw_devlink=permissive`（`nabu-main/config/production.cmdline`），
+  说明固件/设备链接依赖尚未完全理清；同时保留 framebuffer console 与
+  `ignore_loglevel` 也提示早期启动排障需求。
+
+---
+
+## 5. 电源 / 充电（P2）
+
+- **PM8150B ADC 充电终止在 nabu 上根本不翻转**（门限/比较器/采样已回读确认），
+  充满靠软件在电流衰减后锁存 `POWER_SUPPLY_STATUS_FULL`（`nabu-power/README.zh.md:50`）。
+- **LN8000 电荷泵仅在 0..45°C 工作**；软件 JEITA 仅覆盖 -10..59°C。
+- **只有 A 口（USB-A → C）会 QC2/QC3 升压**；C 口没有 PD/PPS 快充。
+- 燃料计依赖内置**单一厂商 profile（K82 sunwoda 8720mAh）**，其他电池批次未验证。
+- EFI RTC 读不出，开机时钟停 epoch，靠 `nabu-pmic-rtc-sync.service` 规避（`:160`）。
+- `qcom_pmi8998_charger.c:1086` 仍留 Type-C 处理 FIXME。
+
+---
+
+## 6. 相机（P1）
+
+- **GNOME Snapshot 50.0 补丁与安装器已移除**（`nabu-camera` `40a5620`），
+  现在仅有 `camera-app/nabu-autofocus` 原型，无通用拍照/录像集成。
+- 只有 libcamera simple IPA 调校文件，**无完整 3A/ISP 调优**；对焦为用户态
+  Tenengrad 扫描 + CN3927 VCM。
+- 前摄 OV8856 无自动对焦（CN3927 仅后摄）。
+- 属于实验代码，替换 DTB 有无法启动风险。
+- 代码内未完成标记：`camss-vfe-17x.c:271`（`XXX 1 for PLAIN8?`）、
+  `camss-vfe.c:275`（`TODO: Replace with pix formats`）。
+
+---
+
+## 7. 传感器（P2，陀螺仪/原始磁力计导出已补）
+
+- **原问题**：仅向桌面导出**加速度计、环境光、罗盘**；陀螺仪与 AK0991x 原始磁力计只能
+  通过 `ssccli` 读取，无 iio/桌面接口。
+- **修复（2026-09-22，`nabu-accelerometer` + iio-sensor-proxy 补丁）**：在
+  `iio-sensor-proxy` 3.9 上新增 SSC 陀螺仪与磁力计驱动，并注册两个独立 D-Bus 接口：
+  `net.hadess.SensorProxy.Gyroscope`（`HasGyroscope`、`(ddd) GyroscopeReadings`，
+  rad/s）与 `net.hadess.SensorProxy.Magnetometer`（`HasMagnetometer`、
+  `(ddd) MagnetometerReadings`，µT），复用与罗盘相同的 `Claim`/`Release` 引用计数；
+  同步更新 D-Bus 策略、udev `IIO_SENSOR_PROXY_TYPE` 与安装脚本（`patches/0003`）。
+  陀螺仪最高约 26 Hz，D-Bus 更新合并为最多每 20 ms 一次。
+- **验证（2026-09-22）**：用持久 D-Bus 客户端 claim 后持续收到
+  `GyroscopeReadings`/`MagnetometerReadings`（3 次 5 帧），罗盘/光/加速度计无回归；
+  `scripts/verify.sh` 增加 `HasGyroscope`/`HasMagnetometer` 检查。
+- 依赖 SLPI 固件、`hexagonrpcd`、libssc、打过补丁的 iio-sensor-proxy 3.9；
+  生产 UKI 与传感器配置强绑定。
+- 自动亮度滤波参数为经验值，会改变桌面 `LightLevel` 响应速度。
+
+---
+
+## 8. 显示 / HDR（P1，已记录：显示链路可用、无 HDR 通路）
+
+- **硬件**：CSOT `xiaomi,nabu-csot-nt36523`（Novatek NT36523），1600x2560@120Hz，
+  dual DSI CPHY 3-lane；面板本身标称 HDR10 / Dolby Vision 能力。
+- **内核链路（2026-09-22 验证）**：mainline `msm` DPU+DSI；面板描述 `bpc=8`、
+  `MIPI_DSI_FMT_RGB888`、无 DSC，DSI 固定 8bit。KMS 上连接器只有
+  EDID/DPMS/link-status/non-desktop/TILE，**没有 `HDR_OUTPUT_METADATA` / `max bpc`
+  / `Colorspace`**；CRTC 有 `VRR_ENABLED`、`CTM`；plane 支持 `AR30/XR30/P010`（10bit）
+  但链路仍是 8bit；DPU 目录只导出 `DPU_DSPP_PCC`。
+- **合成器/播放（验证）**：GNOME/mutter 经 `wp_color_manager_v1` 报告目标是
+  **SDR（gamma2.2 / bt.709 / ~80nit、无 HDR 元数据）**；mpv 播放真实 HDR10 样本
+  （VP9 P2、bt2020/smpte2084 + mastering metadata）时在 libplacebo 内做 HDR→SDR
+  tone mapping。即 HDR 内容目前以 8bit SDR 呈现，无 HDR 直通、无 DV。
+- **需要的改动（路线）**：连接器加 HDR 元数据/`max bpc`；DPU 走 DSPP 色彩管线 +
+  10bit 输出；DSI/面板切 10bit + DSC（当前 CPHY 带宽/面板 init 只支持 8bit）；
+  合成器再做 HDR 合成/映射。
+- 证据：`iris-vaapi/docs/display-hdr-verification.md`、
+  `iris-vaapi/benchmark-results/logs/display-hdr/`。
+- suspend/resume 验证记录见 2.1（已补齐）。
+
+---
+
+## 9. 构建 / 发行 / 一致性
+
+- **生产配置已统一（原 P0，已修复）**：`nabu-accelerometer/config/production.cmdline`、
+  `libexec/install-production-uki.sh` 与其 README 原先把 `qcom_iris` 一并屏蔽，与
+  统一构建的 `nabu-main/config/production.cmdline`（只屏蔽 `venus_core`、由
+  `qcom-iris-autoload.service` 主动加载 iris）相反。现已把遗留定义对齐到 nabu-main，
+  并在 README 说明独立 sensor UKI 脚本已被 nabu-main 取代。实测统一生产内核上
+  `qcom_iris` 与 SLPI/SSC 传感器可共存。
+- 所有模块是对 `linux-6.14` 基线的源码 overlay，**未上游化**；`repos.lock` 锁死 commit。
+- 存在 `linux-6.18` 工作树与 `-6.18.dtsi` 变体，但生产仍锁 6.14，**6.18 尚未成为
+  受支持配置**。
+- 模块与内核必须 **vermagic 完全一致**，不能混装内核/模块。
+- `make install` 会写 ESP 并新建 UEFI 启动项；建议普通用户 `make`、`sudo make install`。
+
+---
+
+## 10. 测试可信度（P2）
+
+- ~~Fluster 完整套件受固件楔死影响，必须每个 pass 重载 `qcom_iris`~~：自动恢复
+  落地后，2026-09-21 全量套件在**不重载**的情况下跑完所有 pass
+  （见 `iris-vaapi/benchmark-results/fluster-full-postfix.md`）。
+- 直接不支持的用例：`tiny(<64)`、4:2:2/4:4:4、10/12-bit 组合、场/交错、
+  高度 >8192（`fluster-full.md:86`）。
+- VP9 变尺寸/`resize` 向量：缩小后高度为 8 倍数的已在 V4L2 逐字节通过；
+  非 8 倍数高度受固件对齐限制（见 1.2）。
+
+---
+
+## 变更记录
+
+- 2026-09-21：初始版本，依据当时各模块 README、docs、fluster 结果与 git 历史整理。
+- 2026-09-21：实现 Iris 自动核心恢复（覆盖 SESSION_INIT 超时、会话错误、长生命周期
+  fd、核心 `IRIS_CORE_ERROR`），交叉编译通过。
+- 2026-09-21：实机安装并验证：Fluster 完整四套在**不重载模块**下跑完所有 pass，
+  3 次自动 power-cycle，VA-API 数字与重载基线一致（见 1.1 与
+  `iris-vaapi/benchmark-results/fluster-full-postfix.md`）。
+- 2026-09-21：音频：实现 WCD934x TX 端口停流顺序候选修复（3.2，待验证）；
+  发现启动偶发无声卡的 SLIM NGD QMI 超时问题（3.1）。
+- 2026-09-22：音频修复验证：SLIM NGD worker 改为无限等待（对齐 Android），
+  连续 3 次启动无丢声卡；WCD934x STOP 先关 TX 端口，overflow 2→0
+  （见 3.1、3.2）。
+- 2026-09-22：统一生产配置：`nabu-accelerometer` 遗留 cmdline/README 不再屏蔽
+  `qcom_iris`，对齐 nabu-main（只屏蔽 `venus_core`）；独立 sensor UKI 标记为
+  已被 nabu-main 取代。
+- 2026-09-22：VP9 动态分辨率（V4L2）：实测确认 `VIDEO.IR.1.2` 对足够资源的
+  in-place resize 不发 sequence change 且不支持 sufficient-seqchange 属性，
+  host 侧 FLUSH/reinit 会让固件 assert；改为 per-buffer 可见矩形 + `G_SELECTION`
+  + 客户端裁剪。`vp90-2-21-resize_inter_1280x720_5_1-2` 连续 3 次 30/30 帧与软解
+  逐字节一致，8 个高度 8 对齐的 resize 向量通过；非 8 倍数高度仍受固件对齐限制
+  （见 1.2 与 `iris-vaapi/benchmark-results/vp9-v4l2-resize.md`）。
+- 2026-09-22：传感器：在 iio-sensor-proxy 3.9 上新增 SSC 陀螺仪与原始磁力计驱动及
+  两个独立 D-Bus 接口（`net.hadess.SensorProxy.Gyroscope`/`.Magnetometer`），更新
+  D-Bus 策略、udev 规则与安装脚本（`patches/0003`）；实机 claim 后持续收到读数，
+  罗盘/光/加速度计无回归（见 7）。
+- 2026-09-22：VPU/suspend：定位并修复 idle collapse 重写后丢失的 VPU5 suspend 绕过
+  （VPU 已收起时对断电硬件调用 prepare_pc → -11 中止 s2idle）；实机 5 个 s2idle
+  周期无失败、周期后 VP9 resize 逐字节通过（见 2.1）。
+- 2026-09-23：s2idle 后 SLPI 崩溃（P1，未解决）：实测一次 s2idle 往返后 SLPI
+  被复位、PDR 注册丢失、传感器进程看门狗每 40s 自杀循环，导致休眠后屏幕无法唤醒、
+  只能硬重启；证明 suspend 实际不可用。内核改名/模块拆分与该故障无关（不 suspend
+  的启动 SLPI 全健康）。证据见 2.3 与 diagnostics 日志。
+- 2026-09-22：显示/HDR：补齐显示链路验证文档。确认面板/链路可用但 mainline msm
+  DPU/DSI **无 HDR 通路**（无 `HDR_OUTPUT_METADATA`/`max bpc`/`Colorspace`，DSI 固定
+  8bit RGB888 无 DSC，DPU 仅 PCC），合成器报告 SDR 目标、HDR10 由 mpv/libplacebo
+  tone map 成 8bit SDR（见 8 与 `iris-vaapi/docs/display-hdr-verification.md`）。
