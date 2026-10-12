@@ -7,8 +7,9 @@ rationale behind the `nabu-module.toml` contract.
 
 1. **One kernel, many concerns.** Display, camera, audio, sensors, power and video decode are
    developed and reviewed separately, but must compile into a single kernel with a single DTS.
-2. **Reproducible.** A commit of `nabu-main` plus `repos.lock` must rebuild the exact same tree
-   from public sources, without a private fork of the kernel carrying the port as history.
+2. **Reproducible.** `repos.lock` pins the clean upstream kernel base, so any checkout of `nabu-main`
+   plus the module repositories rebuilds the kernel from public sources, without a private fork
+   carrying the port as history. Modules are consumed from their own branches.
 3. **`nabu-main` stays generic.** It must not contain a single module name literal; everything it
    does is driven by data each module declares.
 
@@ -89,7 +90,7 @@ precedence over the unsuffixed name, and a `foo-6.18.skip` marker skips that pat
 bootstrap → apply → compose → config → build → collect → package → verify
 ```
 
-- **bootstrap** — fetch the kernel base and every module at the pinned commits (detached).
+- **bootstrap** — fetch the kernel base (pinned by commit) and place each module from its branch.
 - **apply** — reset the kernel to the base, replay each module's overlay/patches.
 - **compose** — generate the product DTS and register the DTB.
 - **config** — defconfig + `sm8150.config` + each module's config fragments, `olddefconfig`.
@@ -102,6 +103,7 @@ bootstrap → apply → compose → config → build → collect → package →
 
 - Module order is deterministic (topological sort, stable by name), so overlays and DTS includes
   apply in the same order everywhere.
-- `repos.lock` pins commits, not branches, and `bootstrap` checks them out detached.
+- `repos.lock` pins only the kernel base (a commit); the modules are taken from their working trees,
+  each tracking its own branch.
 - The one input that is *not* fully pinned is the toolchain: kernel binaries are compiler-version
   sensitive. The 7.2.7 product is built with GCC 15; reproduce with the same major version.
