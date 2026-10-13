@@ -25,6 +25,7 @@
 | P1 | 相机无完整 3A/通用拍照集成（Snapshot 已移除） | 相机可用性 | `nabu-camera` `40a5620` |
 | P1 | suspend/resume → **已验证**；显示链路 **已验证（无 HDR 通路）** | 回归风险 | 2.1、8 |
 | P1 | s2idle resume 后 SLPI 复位 → 传感器/旋转失效 **已修**（挂起前停 `hexagonrpcd`，`nabu-accelerometer` `215eb57`）；`c8c000.serial` 虚假唤醒亦已修 | 可用性、待机 | 2.3 更新、`nabu-accelerometer` `215eb57`/`8a84037` |
+| P1 | 刷机后开机首个图形会话不自动旋转（登录页/用户会话都不转，注销重登才恢复）→ **已修复并实机验证**（2026-10-13：删 ttyGS0 getty、helper 不再提前置 ON、iio-sensor-proxy 启动竞态补丁） | 传感器/旋转可用性 | `nabu-accelerometer` `patches/0005`、`nabu-main/debian/build.sh`、`port-7.2.7.md` 2026-10-13 条 |
 | P2 | 充电硬限制（电荷泵温度窗、仅 A 口 QC、无 PD/PPS、电池 profile 单一） | 充电体验 | `nabu-power/README.zh.md` |
 | P2 | 6.18 移植存在但未成为受支持配置 | 内核升级 | `linux-6.18/`、`repos.lock` |
 | P2 | 传感器仅导出桌面子集 → **陀螺仪/原始磁力计已导出（D-Bus）** | 功能覆盖 | `nabu-accelerometer/README.md`、7 |

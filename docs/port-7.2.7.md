@@ -13,6 +13,37 @@
 
 ## 修改日志（最新在上）
 
+### 2026-10-13 Debian 镜像“开机首个会话不旋转”：三处根因（getty 卡 boot / helper 提前 ON / proxy 启动竞态）
+- 现象：刷机后开机，**首个图形会话（GDM 登录页）与登录后的用户会话都不自动旋转**，注销重登后恢复。
+- 实机（`6.14.11-nabu-full`，`nabu-debian`，192.168.0.67）定位到三层，缺一不可：
+  1. **`serial-getty@ttyGS0.service` 卡住 boot 90 s**：它被 symlink 进 `getty.target.wants`，
+     而无 USB 主机时 `/dev/ttyGS0` 不会出现（legacy `g_serial` 在 UDC 未连接时不建端口）→
+     `dev-ttyGS0.device` 走满 systemd 默认 `JobTimeoutSec=90s` → `getty.target`/
+     `multi-user.target` 被拖到 **1min30s** → `hexagonrpcd`（Debian 单元 `After=multi-user.target`）
+     → `iio-sensor-proxy` 直到 ~113s 才起（`systemd-analyze`：userspace 1min30.6s；
+     `journalctl`：`dev-ttyGS0.device: Job ... timed out`）。
+     修复（`nabu-main/debian/build.sh`）：**删除该 getty**（`console=ttyGS0` 早已移除，串口只用于
+     `dmesg`）→ boot 降到 **~12.6s**，`multi-user.target` @10.8s。
+  2. **`nabu-tablet-mode` 的 30s 兜底提前置 ON**：传感器栈晚到，兜底在真实 `ClaimAccelerometer`
+     之前触发（日志 `SW_TABLET_MODE=ON (no claim seen, timeout)`）；Mutter 在 claim 前看到 ON →
+     `update_panel_orientation_managed()` 先 `uninhibit_tracking()`（`inhibited_count=-1`）→
+     永不 claim → 本次会话不旋转。修复：**删掉该兜底**，只在真实 claim 后 ON
+     （`nabu-accelerometer/userspace/nabu-tablet-mode.c`）。
+  3. **`iio-sensor-proxy` 启动竞态（最关键）**：它**先持有 `net.hadess.SensorProxy` 名字、后
+     `find_sensors()`/`driver_open()`**。Mutter 一看到名字就 `ClaimAccelerometer`，此时 SSC 驱动
+     尚未建立：`handle_generic_method_call()` 把 client 记入 `data->clients[]` 但**无法开流**，而
+     **启动路径 `name_acquired_handler()` 不会为“已 claim”的传感器补 `driver_set_polling()`**
+     （只有热插拔路径会）。结果加速度计永不推数据：`Accel sent by driver` 计数 **0**、
+     `AccelerometerOrientation=undefined`（而 `ssccli --sensor accelerometer` 直读有数据）。注销
+     重登时新 Mutter 在代理就绪后才 claim → 正常。修复：新增
+     `nabu-accelerometer/patches/0005-ssc-startup-claim.patch`，在 `name_acquired_handler()` 里对
+     已有 client 的传感器补 `driver_set_polling(TRUE)`（对齐热插拔路径）。
+- 验证（三处都部署后 reboot，实机）：`iio-sensor-proxy` 日志
+  `ClaimAccelerometer` → `Found SSC accelerometer` → `Emitted orientation changed: from undefined to left-up`；
+  `Accel sent by driver` 1581 条；`AccelerometerOrientation=left-up`、`AccelerometerTilt=tilted-up`；
+  helper `OFF → ClaimAccelerometer → ON (accelerometer claimed)`；boot 12.5s。
+- 说明：三处改动对 6.14.11 与 7.2.7 两个产品都生效（`nabu-accelerometer` 与 Debian 镜像共用）。
+
 ### 2026-09-30 GPU fault 深挖：devcoredump 抓取/解析 + 逐条 fault↔VMA 状态分类
 - 结论（**2026-09-30 已由 fault 时插桩钉死**）：故障 iova 在**故障时刻**属于 GPUVM 的某个
   VMA 且 `mapped=1`，同时 SMMU 页表 walk 的 L3 叶子**有效**（例：
