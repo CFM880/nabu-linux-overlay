@@ -394,6 +394,36 @@ gnome-shell: JS ERROR: Error: Argument descendant may not be null
 （`gdbus ... ScreenSaver.SetActive true/false`）或 `loginctl`；`module_blacklist=` 连手动
 `modprobe` 都会被拒，实验模块只能写进 cmdline。
 
+#### 2.4.4 2026-10-16：视频编解码（Venus/iris）的 GDSC 修复 —— `qcom_iris` 不再需要拉黑（已解决）
+2.4.2 里 `qcom_iris` 之所以要拉黑，是因为它的电源域起不来：
+```
+venus_gdsc status stuck at 'off'
+  gdsc_toggle_logic <- gdsc_enable <- _genpd_power_on <- genpd_runtime_resume
+```
+根因在时钟驱动：SM8150 的 **MVSC 域（`venus_gdsc`，`videocc-sm8150.c` 的 0x814）和 MVS0/MVS1
+一样是「硬件控制」掉电的域**，但 mainline 把它标成了纯软件控制（`flags = 0`）。于是软件写
+`PWR_ON` 被硬件忽略，`gdsc_enable()` 一直轮询 → `stuck at 'off'`，并把这一路 genpd 状态拖坏，
+进而让**整个系统 suspend 崩**（就是 2.4.1 那条链的起点）。
+
+**修复（`nabu-iris` overlay `drivers/clk/qcom/videocc-sm8150.c`）**：
+```c
+static struct gdsc venus_gdsc = {
+	.gdscr = 0x814,
+	...
+	.flags = HW_CTRL_TRIGGER,   /* 原为 0 */
+```
+与其兄弟 `vcodec0_gdsc`/`vcodec1_gdsc` 一致。驱动侧**无需改动**：`qcom_iris` 已经会用
+`dev_pm_genpd_set_hwmode()` 正确处理 `HW_CTRL_TRIGGER`。
+
+**实测（2026-10-16，`6.14.11-nabu-full`，`serial-debug`，相机仍拉黑）**：
+- 保持 `/dev/video0` 打开期间，`/sys/kernel/debug/pm_genpd/{venus,vcodec0,vcodec1}_gdsc/current_state`
+  三者全部 `on`；关闭后干净回到 `off`；整次启动 `stuck at` **0 次**。
+- **在三个域都是 `on` 的状态下** `rtcwake …; systemctl suspend`，**连续 3 轮**全部干净：
+  `dpms=On bl=0`、WiFi 存活、无 `arm-smmu … context fault` / `dpu error` / `refusing to freeze` /
+  `hw recovery`，且 resume 后三个域仍为 `on`。
+- 因此 cmdline 里**移除 `qcom_iris`**（`nabu-main`），视频硬解恢复。**相机仍保留拉黑**：它有另一个
+  `cam_cc_ife_lite_0_clk status stuck at 'on'`（同类问题，尚未修）。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
