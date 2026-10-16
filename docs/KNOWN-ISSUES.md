@@ -25,6 +25,8 @@
 | P1 | 相机无完整 3A/通用拍照集成（Snapshot 已移除） | 相机可用性 | `nabu-camera` `40a5620` |
 | P1 | suspend/resume → **已验证**；显示链路 **已验证（无 HDR 通路）** | 回归风险 | 2.1、8 |
 | P1 | s2idle resume 后 SLPI 复位 → 传感器/旋转失效 **已修**（挂起前停 `hexagonrpcd`，`nabu-accelerometer` `215eb57`）；`c8c000.serial` 虚假唤醒亦已修 | 可用性、待机 | 2.3 更新、`nabu-accelerometer` `215eb57`/`8a84037` |
+| P1 | s2idle resume 后**显示子系统**起不来（`disp_cc_pll0` 锁不上 → `mdss_runtime_resume` -110 → KMS 线程同步外部中止）→ **亮屏时**按电源键休眠后无法唤醒 → **已修（`nabu-display`：对 `core` 时钟持永久引用，PLL 不再解锁），待实机验证** | 待机可用性 | 2.4、`nabu-display` |
+| P1 | 睡前 hook `nabu-sensors-suspend.service` 用 `Before=suspend.target` 与挂起**并发**执行 → 整机卡死（连 RTC 也唤不回）→ **已修（改 `Before=sleep.target`），待实机验证** | 待机可用性 | 2.5、`nabu-accelerometer` |
 | P1 | 刷机后开机首个图形会话不自动旋转（登录页/用户会话都不转，注销重登才恢复）→ **已修复并实机验证**（2026-10-13：删 ttyGS0 getty、helper 不再提前置 ON、iio-sensor-proxy 启动竞态补丁） | 传感器/旋转可用性 | `nabu-accelerometer` `patches/0005`、`nabu-main/debian/build.sh`、`port-7.2.7.md` 2026-10-13 条 |
 | P2 | 充电硬限制（电荷泵温度窗、仅 A 口 QC、无 PD/PPS、电池 profile 单一） | 充电体验 | `nabu-power/README.zh.md` |
 | P2 | 6.18 移植存在但未成为受支持配置 | 内核升级 | `linux-6.18/`、`repos.lock` |
@@ -158,9 +160,12 @@
   崩溃导致整机卡死需硬重启；与 suspend 回调无关，但说明 SLPI/传感器仍有稳定性风险
   （另见第 7 节）。
 
-### 2.3 s2idle resume 后 SLPI 崩溃 → 休眠后屏幕无法唤醒（P1，未解决）
-- **现象（2026-09-23 实机）**：做一次 `s2idle` 后按电源键，屏幕完全没有反应，
-  只能长按电源键硬重启。
+### 2.3 s2idle resume 后 SLPI 崩溃 → 传感器失效（P1，SLPI 部分已修）
+> **更正（2026-10-14）**：本条早期把「休眠后屏幕无法唤醒」也归到这里，**错了**。
+> 屏幕唤不醒是**显示子系统 resume 失败**，与 SLPI 无关，见新增的 **2.4**。
+> 本条只覆盖「resume 后 SLPI 复位 → 传感器/旋转失效」。
+- **现象（2026-09-23 实机）**：做一次 `s2idle` 后，SLPI 复位、传感器失效
+  （屏幕无反应那条见 2.4）。
 - **根因（日志已定位）**：`PM: suspend exit` 的**同一秒**SLPI 被复位
   （`crash #1`），随后 PDR 注册丢失，传感器进程初始化卡死并被看门狗击杀，
   进入 **每 40 秒一次**的崩溃循环：
@@ -238,6 +243,164 @@
 - **待办**：这是「避免触发」，不是修固件；FastRPC/s2idle 的固件层根因仍在。s2idle 现在可放心用，
   但建议先手动验证一次真实用户流程（熄屏→唤醒→旋转）再开自动挂起。待机功耗量化仍受限于
   `qcom-battery` 无 `charge_counter`/`energy_now`。
+
+### 2.4 s2idle resume 后显示子系统无法恢复 → 亮屏时休眠后唤不醒（P1，已修，待实机验证）
+- **现象（2026-10-14 实机，`6.14.11-nabu-full`）**：**屏幕亮着时**按电源键休眠，再按电源键
+  无法唤醒，整块屏幕无反应，只能长按电源强制重启。
+- **根因（日志已定位，与 2.3 的 SLPI 无关）**：`mdss`（`ae00000.display-subsystem`）用的是手写的
+  system-sleep 回调 `mdss_pm_suspend()`/`mdss_pm_resume()`。当设备在挂起时是 runtime-active
+  （屏幕亮着就是这种情况）时，前者只关时钟、**不更新设备的 runtime 状态**，于是 genpd 的 noirq
+  断电把 MDSS GDSC 留在半状态（`mdss_gdsc status stuck at 'on'`），resume 时显示主 PLL 锁不上：
+  ```
+  PM: suspend entry (s2idle)
+  WARNING: mdss_gdsc status stuck at 'on'
+  WARNING: disp_cc_pll0 failed to enable!
+  Failed to prepare clk 'core': -110
+  msm-mdss ae00000.display-subsystem: clock enable failed, ret:-110
+  msm-mdss ae00000.display-subsystem: PM: failed to resume: error -110
+  [drm:dpu_runtime_resume] [dpu error]clock enable failed rc:-110
+  PM: suspend exit
+  ```
+  显示电源域随后一直是关的，gnome-shell 下一次 atomic commit 读 DPU 寄存器即触发**同步外部中止**，
+  KMS 线程被打死 → 屏幕永久黑：
+  ```
+  Internal error: synchronous external abort  Comm: KMS thread
+    dpu_reg_read ← _dpu_crtc_blend_setup ← dpu_crtc_atomic_begin ← drm_mode_atomic_ioctl
+  ```
+- **对照（决定性）**：同一启动里 SLPI/remoteproc **0 崩溃、0 复位**、`iio-sensor-proxy` 未重启，
+  与 2.3 的传感器路径无关；另外屏幕**已熄屏**（DPU/mdss 已 runtime-suspended）时
+  `rtcwake -d rtc0 -m freeze` 干净进出、无 `pll`/`mdss` 报错 —— 这正是 2.1「验证通过」走过的那条
+  路径（`mdss_pm_suspend()` 直接 `return 0`，根本没关显示时钟），所以两台测试路径不同不是矛盾。
+- **修复（`nabu-display` overlay `drivers/gpu/drm/msm/msm_mdss.c`）**：
+  1. 先把手写的 `mdss_pm_suspend()`/`mdss_pm_resume()` 换成与 DPU 相同的
+     `pm_runtime_force_suspend()`/`pm_runtime_force_resume()`（对齐 runtime-PM 路径）。
+     **实测（2026-10-15）这一步不够**：resume 仍 `disp_cc_pll0 failed to enable!` →
+     `mdss_runtime_resume` → `clock enable failed, ret:-110`。即 PLL 重锁失败与 PM 回调写法无关。
+  2. 真正的修法：`msm_mdss_enable()` 里对 `core` 时钟（`DISP_CC_MDSS_MDP_CLK`，父即
+     `disp_cc_pll0`）**持一个永久引用**（`core_clock_kept` 标志，只取一次、不再释放）。这样
+     mdss/DPU 各自 `clk_bulk_disable_unprepare` 都无法把 PLL 解开，resume 只是重新开分支门控，
+     **不再等待 PLL 重锁**。代价：显示 PLL/核心时钟常开，待机功耗会略升（见 2.2 的权衡）。
+     **实测（2026-10-15）**：PLL 报错消失、`PM: Triggering wakeup from IRQ 135`（电源键）也正常，
+     但屏幕仍黑。
+  3. 第三层（DPU/DSI resume 重建）：resume 后显示管线不出帧 ——
+     `[dpu error]enc32 frame done timeout` / `[dpu error]vblank timeout: 10200c1`（触屏
+     `nvt_ts_resume: download firmware failed` 同时出现）。修法：在 DPU 的 system-resume
+     `complete` 回调里，先照搬开机那次「显示断电重来」（`pm_runtime_put_sync` + `msleep(50)`
+     + `pm_runtime_resume_and_get`，见 `nabu-display` overlay `disp/dpu1/dpu_kms.c`），
+     再调 `msm_kms_pm_complete()` 做 restore 提交，从冷状态重建管线。
+- **待验证（2026-10-15 重建后）**：亮屏按电源键休眠 → 再按唤醒（应正常亮屏，旋转/传感器不受影响），
+  且 `journalctl -b -k | grep disp_cc_pll0` 为空。
+- **注意**：这是内建 `msm` 驱动；模块 overlay 同样会应用到 7.2 树，7.2.7 对应代码段一致，迁移时需复验。
+
+#### 2.4.1 2026-10-16 复现：真正的失败链（诊断内核 `no_console_suspend pm_debug_messages`）
+上面「PLL 常开」那一层是必要的，但它**不是** s2idle 失败的全部。让 console 在挂起期间不停后，
+`serial-debug` 产品上 `systemctl suspend` 的真实时间线（串口，`6.14.11-nabu-full`）：
+```
+ 55.80  qcom-camss ac65000.camss: VFE reset timeout / Failed to power up pipeline: -5   (x4)
+ 56.24  PM: suspend entry (s2idle)
+ 56.27  arm-smmu 15000000.iommu: Unhandled context fault: fsr=0x402, iova=0x201541c0,
+        fsynr=0x760042, cbfrsynra=0x800, cb=11     → SID=0x800 == mdss（显示）读 fault
+ 57.06  hrtimer: interrupt took 3973922 ns           ← 4 秒关中断延迟，有东西卡在临界区
+ 57.54  qcom-camss ac65000.camss: CSID reset timeout
+ 60.22  geni_spi c84000.spi: Can't set CS when prev xfer running   ← 触屏 SPI 也卡死
+ 60.50  hw recovery is not complete for ctl:1                        ← DPU CTL 复位失败
+ 60.52  [dpu error]enc32 intf1 ctl 1 reset failure: -22
+ 60.80  [dpu error]enc32 frame done timeout / vblank timeout: 200c1
+ 68.22  Freezing user space processes                ← freeze 在 dpm_suspend *之后*
+ 73.41  Freezing remaining freezable tasks
+ 93.49  Freezing remaining freezable tasks failed after 20.077 s (1 tasks refusing to freeze)
+ 93.86  task:jbd2/sda32-8 state:D  __bio_queue_enter ← blk_mq_submit_bio ← jbd2_journal_commit_transaction
+ 93.90  Restarting kernel threads ... done / Restarting tasks ... done / PM: suspend exit
+187.61  ufshcd-qcom 1d84000.ufshc: ufshcd_uic_hibern8_exit: hibern8 exit failed. ret = -110
+        ufshcd_err_handler ... link is broken                      → UFS 掉链后自愈
+```
+**结论修正**：s2idle **不是**卡在「显示 resume」。它是被 **jbd2 拒绝冻结**（20 s 超时）而
+**主动中止**（`PM: suspend exit`）；与此同时显示 SMMU fault 把 DPU 打死、UFS 掉链、USB gadget 死掉，
+所以整机表现成「黑屏 + 断网 + 无 console，只能长按重启」。关键顺序：`dpm_suspend`
+（含显示/UFS 拆卸）**先于** `freeze_processes`，UFS 队列此刻已被冻结 → jbd2 提交事务阻塞 →
+拒绝冻结。`SID=0x800` 已确认属 `mdss`（`sm8150.dtsi:3823 iommus = <&apps_smmu 0x800 0x420>`，
+在 `mdss: display-subsystem@ae00000` 内；相机是 `0x840`）。
+
+**下一刀（决定性实验，不走 s2idle）**：只做 **DPMS-off 熄屏**
+（`echo Off > /sys/class/drm/card0-DSI-1/dpms`），看是否同样触发
+`iova=0x201541c0 / SID=0x800` 的 SMMU fault：
+- **触发** → 是 DPU/mdss **disable 路径本身**的 bug，可在 `nabu-display` 内修；修好后
+  「电源键熄屏 / 再按亮屏」即可用，不必依赖 s2idle；
+- **不触发** → 属 s2idle 低功耗路径（RPMh/interconnect）的共享资源塌陷
+  （显示 + 相机 + SPI + UFS 同时崩指向这一类）。
+
+#### 2.4.2 2026-10-16 定性：真凶是 `qcom_iris` + `qcom_camss`（已修）
+沿 2.4.1 那条线继续查，发现**显示/SMMU/DPU/jbd2/UFS 全都是下游症状**，最初的污染源是两个
+**实验模块**在开机后被 `wireplumber`（UID 1000）自动探测时把系统电源域/时钟状态搞坏：
+```
+WARNING: CPU: 7 PID: 1645 Comm: wireplumber at drivers/clk/qcom/gdsc.c:178 gdsc_toggle_logic
+  venus_gdsc status stuck at 'off'                 ← 视频(Venus)电源域开不起来
+     gdsc_toggle_logic ← gdsc_enable ← _genpd_power_on ← genpd_runtime_resume
+WARNING: ... drivers/clk/qcom/clk-branch.c:87 clk_branch_toggle
+  cam_cc_ife_lite_0_clk status stuck at 'on'       ← 相机时钟关不掉
+     clk_branch_toggle ← clk_branch2_disable ← clk_disable ← camss_disable_clocks [qcom_camss]
+qcom-iris aa00000.video-codec: failed to resume from power collapse
+```
+第一个启动里这类 `stuck at` WARN 会刷出**几百行**；把两个模块拉黑后，**同一启动里 0 条**。
+（另注：cmdline 里原有的 `module_blacklist=venus_core` 是**无效的旧名字**，真正加载的是
+`qcom_iris`；`module_blacklist=` 连手动 `modprobe` 也会被拒，必须写进 cmdline。）
+
+**修复（`nabu-main`，cmdline）**：把 `qcom_iris,qcom_camss,ov13b10,ov8856,cn3927` 加进
+`module_blacklist=`（`debian/config/debian.cmdline`、`config/production.cmdline`，
+serial-debug 同理）。实测（2026-10-16，`6.14.11-nabu-full`，`serial-debug`）：
+```
+PM: suspend entry (s2idle) → PM: Triggering wakeup from IRQ 230 (rtc) → PM: suspend exit
+```
+**亮屏状态下连续 4 轮 suspend/resume 全部干净**：`dpms=On` 回来、WiFi(ath10k) 存活、
+**无** `arm-smmu ... context fault`、无 `disp_cc_pll0`/`Failed to prepare clk 'core'`、
+无 `hw recovery is not complete for ctl:1`、无 `refusing to freeze`/`ufshcd ... link is broken`。
+**代价**：视频硬解（`nabu-iris`/VA-API）与相机不可用，直到修好下面这条。
+**遗留**：① `venus_gdsc`（`flags=0`）在 SM8150 上软件上电失败、`cam_cc_ife_lite_0_clk` 关不掉，
+是这两个驱动自身的 GDSC/时钟 bug（上游 6.18 也无修法），修好即可恢复视频/相机；
+② resume 时触屏 `nvt_download_firmware_hw_crc` 会重试数次后成功（`Update firmware success!`），
+可用但偏慢。
+
+#### 2.4.3 2026-10-16：唤醒后仍黑屏 —— gnome-shell 解锁界面在 resume 时抛 JS 异常（已用「关锁屏」绕过）
+2.4.2 之后 s2idle 已干净，但**按电源键唤醒后屏幕仍是黑的**（`dpms=Off bl_power=4`，而系统是醒的、
+SSH 可达）。journal 里每次 resume 都有：
+```
+gnome-shell: Object .MetaInputDeviceNative (0x...) has been already disposed
+  #0 keyboard.js:1099   #1 keyboard.js:1105
+gnome-shell: JS ERROR: Error: Argument descendant may not be null
+  maybeHandleEvent@resource:///org/gnome/shell/ui/keyboard.js:1165
+  vfunc_captured_event@resource:///org/gnome/shell/ui/unlockDialog.js:654
+```
+即 Mutter 在 suspend 时销毁了输入设备对象，gnome-shell 的解锁界面/屏幕键盘仍持有旧引用，
+抛异常后解锁流程中断，会话停在「锁屏 + 屏灭」。对照：不经电源键、用
+`rtcwake -d rtc0 -m no -s 15; systemctl suspend` 唤醒时同样有该异常，但屏能回来。
+
+**绕过**（会话 gsettings，已实测 resume 后 `dpms=On bl_power=0`）：
+```
+gsettings set org.gnome.desktop.screensaver lock-enabled false
+gsettings set org.gnome.desktop.lockdown disable-lock-screen true
+```
+代价：会话不再自动锁屏。真正的修法要等 GNOME/mutter 修 device-dispose 时序（或找出销毁来源）。
+
+**附**：`/sys/class/drm/*/dpms` 在 6.14 已是只读，熄屏要经合成器
+（`gdbus ... ScreenSaver.SetActive true/false`）或 `loginctl`；`module_blacklist=` 连手动
+`modprobe` 都会被拒，实验模块只能写进 cmdline。
+
+### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
+- **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
+  系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
+  日志停在 `PM: suspend entry (s2idle)`，之后没有任何设备 suspend/resume 输出。
+- **根因**：`nabu-sensors-suspend.service` 写的是 `Before=suspend.target`，但 systemd 里
+  **`suspend.target` 是在恢复之后才到达**（`suspend.target` 是 `After=systemd-suspend.service`），
+  所以这个 hook 与 `systemd-suspend.service` **并发**执行。日志证据：`Starting systemd-suspend.service`
+  与 `Starting nabu-sensors-suspend.service` 同时刻，且 `Stopping hexagonrpcd.service` 出现在
+  `PM: suspend entry` **之后** —— 在挂起进行中去停 hexagonrpcd（FastRPC/SLPI 拆卸）导致卡死。
+- **对照**：把两个 hook `disable` 后，同样的 `systemctl suspend` 能正常挂起/恢复（显示 PLL 问题见 2.4）；
+  用 `rtcwake -m freeze`（不走 systemd hook）也一直正常。
+- **修复（`nabu-accelerometer` `config/nabu-sensors-suspend.service`）**：改成
+  `Before=sleep.target` + `WantedBy=sleep.target`（systemd 官方的睡前 hook 点），确保在
+  `systemd-suspend.service` 之前**跑完**；`nabu-sensors-resume.service` 保持
+  `After=suspend.target`/`WantedBy=suspend.target`（恢复之后）。
+- **待验证**：重建/替换单元并重新 `enable` 后，亮屏按电源键休眠 → 唤醒，确认不再卡死。
 
 
 ---
@@ -436,6 +599,16 @@
   被复位、PDR 注册丢失、传感器进程看门狗每 40s 自杀循环，导致休眠后屏幕无法唤醒、
   只能硬重启；证明 suspend 实际不可用。内核改名/模块拆分与该故障无关（不 suspend
   的启动 SLPI 全健康）。证据见 2.3 与 diagnostics 日志。
+- 2026-10-14：**更正 2.3 的归属**：实测（`6.14.11-nabu-full`）发现「休眠后屏幕唤不醒」
+  与 SLPI 无关，是显示子系统 resume 失败 —— 亮屏时挂起，`mdss_pm_suspend()` 关掉显示时钟
+  但没改 runtime 状态，resume 时 `disp_cc_pll0` 锁不上（`mdss_pm_resume` -110），随后
+  KMS 线程读 DPU 寄存器触发同步外部中止。修复：`nabu-display` 把 mdss 的 system-sleep
+  改为 `pm_runtime_force_suspend/resume`（见 2.4，待实机验证）。同启动 SLPI 0 崩溃。
+- 2026-10-15：2.4 深挖修正 —— 只改 mdss 的 PM 回调**不够**（resume 仍 `disp_cc_pll0
+  failed to enable!`/`-110`）；改为在 `msm_mdss_enable()` 对 `core` 时钟持永久引用，使 PLL
+  在 s2idle 后不被解锁、resume 无需重锁。另定位并修复 2.5：`nabu-sensors-suspend.service`
+  的 `Before=suspend.target` 与挂起并发执行会让整机卡死，改为 `Before=sleep.target`。
+  两项均待实机验证。
 - 2026-09-22：显示/HDR：补齐显示链路验证文档。确认面板/链路可用但 mainline msm
   DPU/DSI **无 HDR 通路**（无 `HDR_OUTPUT_METADATA`/`max bpc`/`Colorspace`，DSI 固定
   8bit RGB888 无 DSC，DPU 仅 PCC），合成器报告 SDR 目标、HDR10 由 mpv/libplacebo
