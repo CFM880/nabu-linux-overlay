@@ -462,12 +462,27 @@ static struct gdsc venus_gdsc = {
   - **修复**（`nabu-iris` `b9c26ae`）：① PC 恢复失败 → 强制 `iris_core_recover()` 完整重启 VPU；
     ② `iris_core_deinit()` 里清 `vpu_suspended` 并取消延迟 collapse 工作，避免陈旧 worker 把刚重启
     好的 core 再压下去。
-  - **实测**：连续 **6 轮**「VA-API 4K 解码 → 挂起 → 唤醒 → 再解码」，`decode-after=ok`、
-    `up` 单调递增（无重启）、`power on failed` 与 `restarting the core` 计数均为 **0**。
-  - **反面证据（实测，勿重蹈）**：曾试图把 legacy VPU5 的 MMCC wrapper handoff
-    （`WRAPPER_VCODEC0_MMCC_POWER_CONTROL`）挪到 codec 时钟之后执行 —— **会把整机在启动时 wedge 死**
-    （试过一次，平板启动卡死，只能还原 UKI）。那些寄存器确实碰不得。
-  - 因此**没有**采用 `qcom_iris.power_collapse=0`（那等于「VPU 一直供电」）当修法。
+  - **实测**（`nabu-iris` `b9c26ae` + **模块真正加载**后，2026-10-17）：连续 **12 轮**
+    「VA-API 4K 解码 → 挂起 → 唤醒 → 再解码」，`decode-after=ok`、`up` 单调递增（无重启）、
+    `power on failed` / `failed to resume from power collapse` / `restarting the core` 计数均为 **0**
+    （偶发失败本轮未复现，恢复路径未被真实触发，但代码路径已就位）。
+  - **运维要点（我为此白跑了好几轮）**：`nabu-iris` 等**内核模块在 rootfs 的
+    `/lib/modules/<release>/kernel/...`**，只替换 UKI **不会**更新它们（UKI 里的只是 initrd 副本，
+    运行期加载的是 rootfs 里的）。改模块必须把 `.ko` 拷到对应路径 + `depmod -a`，
+    或走 `make install-modules`。上面一度写的「6 轮」其实是**旧模块**跑出来的数据。
+  - **反面证据 1（实测，勿重蹈）**：写 legacy VPU5 的 `WRAPPER_VCODEC0_MMCC_POWER_CONTROL`
+    （`iris_vpu_set_vcodec_hw_control()`，端口自造的那套）—— **整机在启动时 wedge 死**
+    （平板启动卡死，只能还原 UKI）。那些寄存器确实碰不得。
+  - **反面证据 2（实测，勿重蹈）**：按厂家做法、改用**框架级** `dev_pm_genpd_set_hwmode()` 把
+    MVS0/MVS1 切到硬件模式（等价于厂家 `qcom,support-hw-trigger` +
+    `regulator_set_mode(REGULATOR_MODE_FAST)`，时机也对：codec 时钟之后、固件启动之前）——
+    power-on 侧确认生效（`vcodec power: handing the MVS GDSCs to hardware control`），
+    **但解码随即静默挂起**（`open` 不再返回，也不进入错误路径，恢复机制无从介入）。
+    厂家能用硬件模式，是因为它**整条 PC 序列**都配套（`VIDEO_CTRL_STATUS_PC_READY`、
+    `VIDEO_WRAPPER_CPU_STATUS` 的 WFI/idle 位轮询、`__prepare_pc`、最多 10 次重试、失败回退等）；
+    只补 handoff 这一步会让解码崩掉。→ 端口「MVS 保持软件模式」的选择是**对的**，已回退。
+  - 因此**没有**采用 `qcom_iris.power_collapse=0`（那等于「VPU 一直供电」）当修法；正解就是上面的
+    「失败即自动完整重启 VPU」。
 
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
