@@ -421,8 +421,19 @@ static struct gdsc venus_gdsc = {
 - **在三个域都是 `on` 的状态下** `rtcwake …; systemctl suspend`，**连续 3 轮**全部干净：
   `dpms=On bl=0`、WiFi 存活、无 `arm-smmu … context fault` / `dpu error` / `refusing to freeze` /
   `hw recovery`，且 resume 后三个域仍为 `on`。
+- **解码实测（2026-10-16，ffmpeg 7.1.5，`hevc_v4l2m2m` 走内核 V4L2 M2M 即 iris）**：
+  - `Test Jellyfin 1080p HEVC 8bit 20M.mp4`：1797 帧全解，~663 fps（约 11 倍实时）；
+  - `Test Jellyfin 4K HEVC 8bit 60M.mp4`（3840x2160@60，~59 Mbps）：1797 帧全解，
+    ~179 fps（约 3 倍实时）；解码期间 `venus/vcodec0/vcodec1` 三个域均 `on`，dmesg 无错误；
+  - **先解码 → `systemctl suspend` → 唤醒 → 再解码**：唤醒后 `dpms=On`，解码性能不变
+    （173 → 171 fps），全程无 `stuck at` / SMMU / DPU / jbd2 报错。
 - 因此 cmdline 里**移除 `qcom_iris`**（`nabu-main`），视频硬解恢复。**相机仍保留拉黑**：它有另一个
   `cam_cc_ife_lite_0_clk status stuck at 'on'`（同类问题，尚未修）。
+- **两个后续项（不在本次范围）**：① 驱动**未注册 media device**（系统里没有 `/dev/media*`），
+  所以依赖 media controller 拓扑的消费者用不了它（GStreamer 的 `v4l2h265dec` 会直接拒绝 caps，
+  `v4l2slh265dec`/`vaapih265dec` 也不出现）；直接用 `/dev/video0` 的消费者
+  （ffmpeg `hevc_v4l2m2m`）正常。② `serial-debug` 产品里**没装 `iris-vaapi`**
+  （VA 驱动 `vpu_drv_video.so` 缺失），所以浏览器/播放器的 VA-API 硬解（Jellyfin 场景）暂不可用。
 
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
