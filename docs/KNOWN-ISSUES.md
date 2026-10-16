@@ -444,18 +444,24 @@ static struct gdsc venus_gdsc = {
      `__vaDriverInit_1_<minor>` 往下找到 `1.0`。**已修**（`iris-vaapi` `125413b`：以 1.0 为入口，
      其余名字转发）。修后 `LIBVA_DRIVER_NAME=vpu ffmpeg -hwaccel vaapi` 解 1080p60 全片
      **1797 帧 / ~382 fps**，4K60 正常，全程走 `/dev/video0`。
-- **未决：VA-API 会话后的偶发 wedge（约 1/3）**。现象：VA-API 解码结束后，驱动偶发连刷
+- **VA-API 会话后的偶发 wedge（约 1/3）—— 根因找到并已加恢复**。现象：VA-API 解码结束后，驱动偶发连刷
   `failed to resume from power collapse` / `power on failed` / `core init failed`，此后
   `open /dev/video0` 直接 `EINVAL`，**再挂起会卡死**（只能重启）。
-  - 根因方向：端口用 `defer_vcodec_power=true` **整段跳过**了 legacy VPU5 的 MMCC wrapper handoff
-    （`WRAPPER_VCODEC0_MMCC_POWER_CONTROL`，`iris_vpu_set_vcodec_hw_control()`），固件因此在软件
-    模式下无法完整完成 power collapse。
-  - **反面证据（实测）**：把这个 handoff 挪到 codec 时钟之后再执行（`iris_vpu_common.c`），
-    **会在启动/首次 open 时把整机 wedge 住**（试过一次，平板启动卡死，只能还原 UKI）。也就是说
-    那些寄存器确实碰不得；要做对需要真正的 VPU5 bring-up，不是「挪顺序」能解决。
+  - **真正的根因**（读代码定位，与寄存器顺序无关）：`iris_v4l2_open()` 对
+    `iris_pc_resume()` 的失败**只 `dev_warn`**，流程继续；而紧跟其后的 `iris_core_init()`
+    因为 `core->state` 仍是 `IRIS_CORE_INIT`，开头就 `return 0` —— 于是在「VPU 已死」的状态下
+    **照常交出会话**，设备从此留在坏状态，进而把下一次系统挂起拖死。现成的
+    `iris_core_recover()`（`deinit` = PAS shutdown + 断电 + 队列 deinit；`init` = 上电 + 固件重载
+    + HFI 重 init）**只在 `state == ERROR` 时才被调用**，所以这条路径根本不触发。
+  - **修复**（`nabu-iris` `b9c26ae`）：① PC 恢复失败 → 强制 `iris_core_recover()` 完整重启 VPU；
+    ② `iris_core_deinit()` 里清 `vpu_suspended` 并取消延迟 collapse 工作，避免陈旧 worker 把刚重启
+    好的 core 再压下去。
+  - **实测**：连续 **6 轮**「VA-API 4K 解码 → 挂起 → 唤醒 → 再解码」，`decode-after=ok`、
+    `up` 单调递增（无重启）、`power on failed` 与 `restarting the core` 计数均为 **0**。
+  - **反面证据（实测，勿重蹈）**：曾试图把 legacy VPU5 的 MMCC wrapper handoff
+    （`WRAPPER_VCODEC0_MMCC_POWER_CONTROL`）挪到 codec 时钟之后执行 —— **会把整机在启动时 wedge 死**
+    （试过一次，平板启动卡死，只能还原 UKI）。那些寄存器确实碰不得。
   - 因此**没有**采用 `qcom_iris.power_collapse=0`（那等于「VPU 一直供电」）当修法。
-  - 待办：让驱动在 power-collapse/power-on 失败时做**完整恢复**（PAS shutdown + 固件重载 +
-    重新 init），使偶发 wedge 不再拖垮后续挂起。
 
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
