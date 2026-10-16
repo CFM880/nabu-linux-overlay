@@ -360,7 +360,7 @@ PM: suspend entry (s2idle) → PM: Triggering wakeup from IRQ 230 (rtc) → PM: 
 ② resume 时触屏 `nvt_download_firmware_hw_crc` 会重试数次后成功（`Update firmware success!`），
 可用但偏慢。
 
-#### 2.4.3 2026-10-16：按电源键唤醒后仍黑屏（未决；已排除锁屏/解锁界面）
+#### 2.4.3 2026-10-16：按电源键唤醒后黑屏（已解决：resume 后 gnome-shell 的伪熄屏）
 2.4.2 之后 s2idle 已干净，但**按电源键唤醒后屏幕仍是黑的**（`dpms=Off bl_power=4`，而系统是醒的、
 SSH 可达）。journal 里每次 resume 都有：
 ```
@@ -370,19 +370,25 @@ gnome-shell: JS ERROR: Error: Argument descendant may not be null
   maybeHandleEvent@resource:///org/gnome/shell/ui/keyboard.js:1165
   vfunc_captured_event@resource:///org/gnome/shell/ui/unlockDialog.js:654
 ```
-**注意：这个 JS 异常不是黑屏的原因（已排除）**。曾据此判断「解锁流程被打断 → 停在黑屏」，
-于是关掉自动锁屏来绕过 —— **那是误判**：恢复锁屏后重新实测，RTC 唤醒一样 `dpms=On bl_power=0`
-且 `LockedHint=yes`（正常停在登录页），JS 异常照样出现（4 次）却不影响亮屏。锁屏已恢复，
-`org.gnome.desktop.screensaver lock-enabled` / `lockdown disable-lock-screen` 保持默认。
+**结论（2026-10-16 实机验证，已解决）**。排查过程中误判过两次，都被实测排除：
 
-**真正的差异（推断）**：RTC 唤醒是「完整睡下去、再醒」；而按电源键时那次按键是在
-`PM: suspend entry` 之后约 75 ms 到达的 —— 等于**在进入挂起的过程中把挂起打断**。串口里紧跟着
-`nvt_drm_notifier_callback 1847: event=1, *blank=0`（unblank），约 400 ms 后又是
-`event=2, *blank=1`（blank）：合成器在「刚为挂起灭屏」与「被打断后重新亮屏」之间走了一个来回，
-最后停在灭屏状态，且系统其实是醒的。
+1. **不是**解锁界面的 JS 异常：上面那段异常每次 resume 都出现（4 次），但锁屏保持开启时实测
+   RTC 唤醒照样 `dpms=On bl_power=0` + `LockedHint=yes`，不影响亮屏。
+2. **不是**「按键在挂起进入过程中把挂起打断」：用 2 秒的 RTC 闹钟刻意在进入阶段唤醒，
+   复现不出来（`dpms=On`）。
 
-**下一步**：加一个 resume 兜底 unblank（用户会话里 `After=suspend.target` 的单元，调
-`gdbus ... ScreenSaver.SetActive false`），或去查 GNOME 的 `PrepareForSleep` 状态机。
+**真正的根因**：resume 之后 gnome-shell 的 idle watch 处于残留状态，会在唤醒后**约 25–30 秒
+自己把屏灭掉**（`blank=1`），而**系统是醒的**（并不是挂起）。于是出现「屏灭但没挂起」的窗口；
+又因为 GNOME 的 `power-button-action='suspend'` 对**每一次**电源键按下都执行挂起，此时按下就变成
+「再挂起一次」→ 表现为「按一下不亮、要按两下」。证据：
+- 新锁屏（状态干净）后 90 秒不灭；resume 之后则约 30 秒就灭；
+- `idle-delay=0`（或刷新会话状态）后，RTC 唤醒连续 90 秒 `dpms=On` 稳定。
+
+**处置**（全部用 GNOME 原生配置；**未新增任何自定义服务**，也**未修改镜像 dconf 默认值**）：
+- 保持 stock：`power-button-action='suspend'`、`screensaver lock-enabled=true`（唤醒停在登录页）；
+- 设备上每用户把 `sleep-inactive-ac-timeout` 设成与 `idle-delay` 相等（300），让**熄屏与挂起
+  同时发生**，不再有「已熄屏但未挂起」的窗口；空闲 5 分钟自动睡，按一下休眠 / 按一下唤醒。
+- 该项是**用户 dconf 里的每用户设置**，按约定**不固化进镜像**（`/etc/dconf/db/` 保持原样）。
 
 **附**：`/sys/class/drm/*/dpms` 在 6.14 已是只读，熄屏要经合成器
 （`gdbus ... ScreenSaver.SetActive true/false`）或 `loginctl`；`module_blacklist=` 连手动
