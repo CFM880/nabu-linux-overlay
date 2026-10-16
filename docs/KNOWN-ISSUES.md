@@ -360,7 +360,7 @@ PM: suspend entry (s2idle) → PM: Triggering wakeup from IRQ 230 (rtc) → PM: 
 ② resume 时触屏 `nvt_download_firmware_hw_crc` 会重试数次后成功（`Update firmware success!`），
 可用但偏慢。
 
-#### 2.4.3 2026-10-16：唤醒后仍黑屏 —— gnome-shell 解锁界面在 resume 时抛 JS 异常（已用「关锁屏」绕过）
+#### 2.4.3 2026-10-16：按电源键唤醒后仍黑屏（未决；已排除锁屏/解锁界面）
 2.4.2 之后 s2idle 已干净，但**按电源键唤醒后屏幕仍是黑的**（`dpms=Off bl_power=4`，而系统是醒的、
 SSH 可达）。journal 里每次 resume 都有：
 ```
@@ -370,16 +370,19 @@ gnome-shell: JS ERROR: Error: Argument descendant may not be null
   maybeHandleEvent@resource:///org/gnome/shell/ui/keyboard.js:1165
   vfunc_captured_event@resource:///org/gnome/shell/ui/unlockDialog.js:654
 ```
-即 Mutter 在 suspend 时销毁了输入设备对象，gnome-shell 的解锁界面/屏幕键盘仍持有旧引用，
-抛异常后解锁流程中断，会话停在「锁屏 + 屏灭」。对照：不经电源键、用
-`rtcwake -d rtc0 -m no -s 15; systemctl suspend` 唤醒时同样有该异常，但屏能回来。
+**注意：这个 JS 异常不是黑屏的原因（已排除）**。曾据此判断「解锁流程被打断 → 停在黑屏」，
+于是关掉自动锁屏来绕过 —— **那是误判**：恢复锁屏后重新实测，RTC 唤醒一样 `dpms=On bl_power=0`
+且 `LockedHint=yes`（正常停在登录页），JS 异常照样出现（4 次）却不影响亮屏。锁屏已恢复，
+`org.gnome.desktop.screensaver lock-enabled` / `lockdown disable-lock-screen` 保持默认。
 
-**绕过**（会话 gsettings，已实测 resume 后 `dpms=On bl_power=0`）：
-```
-gsettings set org.gnome.desktop.screensaver lock-enabled false
-gsettings set org.gnome.desktop.lockdown disable-lock-screen true
-```
-代价：会话不再自动锁屏。真正的修法要等 GNOME/mutter 修 device-dispose 时序（或找出销毁来源）。
+**真正的差异（推断）**：RTC 唤醒是「完整睡下去、再醒」；而按电源键时那次按键是在
+`PM: suspend entry` 之后约 75 ms 到达的 —— 等于**在进入挂起的过程中把挂起打断**。串口里紧跟着
+`nvt_drm_notifier_callback 1847: event=1, *blank=0`（unblank），约 400 ms 后又是
+`event=2, *blank=1`（blank）：合成器在「刚为挂起灭屏」与「被打断后重新亮屏」之间走了一个来回，
+最后停在灭屏状态，且系统其实是醒的。
+
+**下一步**：加一个 resume 兜底 unblank（用户会话里 `After=suspend.target` 的单元，调
+`gdbus ... ScreenSaver.SetActive false`），或去查 GNOME 的 `PrepareForSleep` 状态机。
 
 **附**：`/sys/class/drm/*/dpms` 在 6.14 已是只读，熄屏要经合成器
 （`gdbus ... ScreenSaver.SetActive true/false`）或 `loginctl`；`module_blacklist=` 连手动
