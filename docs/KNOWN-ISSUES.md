@@ -433,8 +433,14 @@ static struct gdsc venus_gdsc = {
   拓扑的消费者用不了它（GStreamer 的 `v4l2h265dec` 会直接拒绝 caps，`v4l2slh265dec`/`vaapih265dec`
   也不出现）；直接用 `/dev/video0` 的消费者（ffmpeg `hevc_v4l2m2m`）正常。
 - **VA-API（`iris-vaapi`）实测（2026-10-16）—— 两个问题，第一个已修**：
-  1. **没装进镜像**：`nabu-userspace` deb 只覆盖 `/usr/local`，而 VA 驱动要落到
-     `/usr/lib/aarch64-linux-gnu/dri/vpu_drv_video.so`（手动装上去才验证得下去）。**打包缺口，待补**。
+  1. **已修：打包缺口**。原 `nabu-userspace` deb 只覆盖 `/usr/local`（`overlay_nabu_userspace()` 也是逐个手写模块文件 —— 所以 `/etc/modprobe.d/qcom-iris.conf` 在、VA 驱动却不在），
+     重新刷 rootfs 后 VA 驱动会丢。改法（`nabu-main` `f4fa5a4`）：新增通用的
+     `stage_module_install_entries()`，**遍历各兄弟模块的 `nabu-module.toml`**，把 `[install]` 里属于
+     rootfs 的条目按其 `[artifacts]` 声明的来源落进镜像（排除 `/lib/modules`、`/lib/firmware`），
+     已存在的不覆盖；fresh 与 reused rootfs 两条路径都调用。`nabu-main` 里不含任何模块名字面量。
+     **实测**：构建镜像后直接检查 `debian/work/rootfs/` →
+     `usr/lib/aarch64-linux-gnu/dri/vpu_drv_video.so` ✓、
+     `etc/modprobe.d/qcom-iris.conf` ✓、`usr/share/libcamera/ipa/simple/ov13b10.yaml` ✓。
   2. libva 找不到入口符号：
      ```
      libva: .../vpu_drv_video.so has no function __vaDriverInit_1_0
