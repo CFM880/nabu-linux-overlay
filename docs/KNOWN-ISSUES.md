@@ -429,11 +429,33 @@ static struct gdsc venus_gdsc = {
     （173 → 171 fps），全程无 `stuck at` / SMMU / DPU / jbd2 报错。
 - 因此 cmdline 里**移除 `qcom_iris`**（`nabu-main`），视频硬解恢复。**相机仍保留拉黑**：它有另一个
   `cam_cc_ife_lite_0_clk status stuck at 'on'`（同类问题，尚未修）。
-- **两个后续项（不在本次范围）**：① 驱动**未注册 media device**（系统里没有 `/dev/media*`），
-  所以依赖 media controller 拓扑的消费者用不了它（GStreamer 的 `v4l2h265dec` 会直接拒绝 caps，
-  `v4l2slh265dec`/`vaapih265dec` 也不出现）；直接用 `/dev/video0` 的消费者
-  （ffmpeg `hevc_v4l2m2m`）正常。② `serial-debug` 产品里**没装 `iris-vaapi`**
-  （VA 驱动 `vpu_drv_video.so` 缺失），所以浏览器/播放器的 VA-API 硬解（Jellyfin 场景）暂不可用。
+- **后续项 ①**：驱动**未注册 media device**（系统里没有 `/dev/media*`），所以依赖 media controller
+  拓扑的消费者用不了它（GStreamer 的 `v4l2h265dec` 会直接拒绝 caps，`v4l2slh265dec`/`vaapih265dec`
+  也不出现）；直接用 `/dev/video0` 的消费者（ffmpeg `hevc_v4l2m2m`）正常。
+- **VA-API（`iris-vaapi`）实测（2026-10-16）—— 两个问题，第一个已修**：
+  1. **没装进镜像**：`nabu-userspace` deb 只覆盖 `/usr/local`，而 VA 驱动要落到
+     `/usr/lib/aarch64-linux-gnu/dri/vpu_drv_video.so`（手动装上去才验证得下去）。**打包缺口，待补**。
+  2. libva 找不到入口符号：
+     ```
+     libva: .../vpu_drv_video.so has no function __vaDriverInit_1_0
+     Failed to initialise VAAPI connection: 1 (operation failed)
+     ```
+     源码里**硬编码**了 `__vaDriverInit_1_23`，而 libva 按自己版本（平板 2.22）从
+     `__vaDriverInit_1_<minor>` 往下找到 `1.0`。**已修**（`iris-vaapi` `125413b`：以 1.0 为入口，
+     其余名字转发）。修后 `LIBVA_DRIVER_NAME=vpu ffmpeg -hwaccel vaapi` 解 1080p60 全片
+     **1797 帧 / ~382 fps**，4K60 正常，全程走 `/dev/video0`。
+- **未决：VA-API 会话后的偶发 wedge（约 1/3）**。现象：VA-API 解码结束后，驱动偶发连刷
+  `failed to resume from power collapse` / `power on failed` / `core init failed`，此后
+  `open /dev/video0` 直接 `EINVAL`，**再挂起会卡死**（只能重启）。
+  - 根因方向：端口用 `defer_vcodec_power=true` **整段跳过**了 legacy VPU5 的 MMCC wrapper handoff
+    （`WRAPPER_VCODEC0_MMCC_POWER_CONTROL`，`iris_vpu_set_vcodec_hw_control()`），固件因此在软件
+    模式下无法完整完成 power collapse。
+  - **反面证据（实测）**：把这个 handoff 挪到 codec 时钟之后再执行（`iris_vpu_common.c`），
+    **会在启动/首次 open 时把整机 wedge 住**（试过一次，平板启动卡死，只能还原 UKI）。也就是说
+    那些寄存器确实碰不得；要做对需要真正的 VPU5 bring-up，不是「挪顺序」能解决。
+  - 因此**没有**采用 `qcom_iris.power_collapse=0`（那等于「VPU 一直供电」）当修法。
+  - 待办：让驱动在 power-collapse/power-on 失败时做**完整恢复**（PAS shutdown + 固件重载 +
+    重新 init），使偶发 wedge 不再拖垮后续挂起。
 
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
