@@ -593,12 +593,36 @@ configuring streams: (0) 1632x1232-ABGR8888
 **仍存在的功能缺口（不影响出画面）**
 
 - **颜色未标定**：0.4.0 没有 `Ccm` 算法，端口的 CCM 用不上（见坑 1）
-- 传感器驱动缺 selection/crop API → libcamera 报
-  `'ov8856 4-0010': The sensor kernel driver needs to be fixed`、
-  `Unable to get rectangle … Inappropriate ioctl for device`，
-  `PixelArraySize` 被默认成 4208x3120 / 3280x2464
 - `IPASoft: Failed to create camera sensor helper` 是 **cosmetic**（见
   `nabu-camera/patches/README.md`），AGC 走 fallback，行为一致
+- 传感器驱动缺 selection/crop API —— **已在 2.4.8 修掉**
+
+#### 2.4.8 2026-10-17：补上传感器 selection API —— 预览从 1632x1232@30fps 变 1640x1232@60fps（已修）
+
+libcamera 的 sensor 支持会问 `V4L2_SEL_TGT_CROP` / `_CROP_BOUNDS` /
+`_CROP_DEFAULT` / `_NATIVE_SIZE`；`ov8856` 和 `ov13b10` 都没实现
+`get_selection`，于是每次都刷：
+
+```
+'ov8856 4-0010': Unable to get rectangle 0/1/2 on pad 0/0: Inappropriate ioctl for device
+'ov8856 4-0010': The sensor kernel driver needs to be fixed
+The PixelArraySize property has been defaulted to 3280x2464
+```
+
+拿不到像素阵列还有实际后果：libcamera 在请求 1640x1232 时自己裁成
+**1632x1232**，并要多做一层软件缩放。
+
+**`nabu-camera` `3472712`**：两个驱动都实现 `get_selection` ——
+`NATIVE_SIZE` / `CROP_BOUNDS` / `CROP_DEFAULT` 返回原生像素阵列
+（ov8856 `3280x2464`、ov13b10 `4208x3120`），`CROP` 返回当前模式尺寸。
+
+实机验证（同一台、重启后）：
+
+| | 之前 | 之后 |
+|---|---|---|
+| 上表三条 libcamera 警告 | 有 | **0** ✓ |
+| 预览配置 | `1632x1232-ABGR8888` | **`1640x1232-ABGR8888`** ✓ |
+| 帧率 | ~30 fps | **~60 fps** ✓ |
 
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
