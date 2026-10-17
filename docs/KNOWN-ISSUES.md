@@ -698,6 +698,57 @@ nabu-shot.sh [-c 相机] [-w 宽] [-H 高] [-n 帧数] out.png
 注意：libcamera 相机是**独占**的，用这条路径前要先关掉占着相机的应用
 （`pkill -x snapshot`；PipeWire 只是 probe 时短暂打开，不冲突）。
 
+#### 2.4.11 2026-10-17：「电源键无法唤醒」的真正根因 —— dispcc 用了 sm8250 的 PLL 配置（已修）
+
+按要求只动内核，把「休眠后无法唤醒」一路查到显示时钟。
+
+**现象**：开机后**第一次**挂起正常 ✓，之后**每一次**都卡死在挂起里 ✗
+（串口 15 分钟无输出 ✗，任何唤醒源都无效 ✗，只能长按强制重启 ✗）。
+
+**现场**（`console=ttyGS0` + `no_console_suspend`）：
+
+```
+disp_cc_pll0 failed to enable!
+WARNING: CPU: 2 PID: 592 at clk-alpha-pll.c:406 wait_for_pll
+CPU: 2 PID: 592 Comm: systemd-logind
+ wait_for_pll <- clk_trion_pll_enable <- alpha_pll_trion_prepare <- clk_core_prepare
+```
+随后 `disp_cc_mdss_ahb_clk already disabled / already unprepared`、
+`msm_dsi_phy ae94400.phy: Runtime PM usage count underflow!`、
+`Failed to disable vdds: -EIO` 连锁出现 ✗，挂起再也走不完 ✗。
+
+**根因**：nabu 的 `compatible = "qcom,sm8150-dispcc"` 在 mainline 里由
+**`dispcc-sm8250.c`** 匹配（`CLK_ALPHA_PLL_TYPE_LUCID` 就是
+`CLK_ALPHA_PLL_TYPE_TRION` 的别名，**寄存器布局本身没问题**），但
+`disp_cc_pll0` 的**配置值整套是 sm8250 的**：
+
+| 字段 | sm8150（厂家 `dispcc-sm8150.c`） | sm8250（nabu 实际在用的值） |
+|---|---|---|
+| `config_ctl_hi_val` | `0x00002267` | `0x00002261` |
+| `config_ctl_hi1_val` | `0x00000024` | `0x329A699C` |
+| `test_ctl_val/hi/hi1` | `0x0` / `0x2` / `0x0` | 未设置 |
+| `user_ctl_hi1_val` | `0x000000D0` | `0x00000000` |
+
+bootloader 已经让 PLL 跑起来，所以面板一开始能亮；但 **Linux 一旦把它关掉，
+就再也使能不起来**（`PLL_ACTIVE_FLAG` 永不置位）⇒ 第一次挂起（其 resume 会关/开显示）
+之后，**之后每次挂起都在这里卡死**。
+
+**修法**：`nabu-display` 新增
+`kernel-overlay/drivers/clk/qcom/dispcc-sm8250.c`，把 `disp_cc_pll0_config`
+换成厂家的 sm8150 值（注释里写明出处与失败模式）。
+
+**实机验证（内核 `#78`）**：同一次挂起的串口里
+`disp_cc_pll0` / `disp_cc_mdss_ahb_clk` / `underflow` / `vdds` 告警**全部为 0** ✓，
+`nvt_drm_notifier_callback: event=1, *blank=0` ✓（显示正常解黑），并出现
+`Debian GNU/Linux 13 nabu-debian ttyGS0` 登录提示 ✓。
+
+**遗留**：
+- **唤醒后 WiFi 不自动恢复** ✗（`ath10k_snoc` resume 路径；需 `systemctl restart
+  NetworkManager` 或重启）——与本次 PLL 问题无关。
+- 触摸屏 resume 时 `nvt_ts_resume: download firmware failed` ✗（触摸仍能恢复）。
+- `dispcc-sm8250.c` 是 sm8250/sm8150 **共用**文件，当前改动只服务 nabu；应按
+  compatible 拆分，避免影响 sm8250。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
