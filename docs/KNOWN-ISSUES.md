@@ -794,6 +794,42 @@ MVS GDSC 保持软件模式是对的，PC handoff 不可用 ✗）。
    （用户此前否过「一直供电」式的做法）。
 3. 暂不处理：第一次休眠/唤醒可用，第二次之后需重启。
 
+#### 2.4.13 2026-10-17：「第二次挂起卡死」已修 —— iris 的 power-off 幂等
+
+2.4.12 的带串口 + dyndbg 复现把链条定死为**两层**：
+
+1. **硬件限制（不改）**：SM8150 的视频 GDSC 是硬件触发 ✓（`venus`/`mvs0`/`mvs1`
+   都已是 `HW_CTRL_TRIGGER` ✓），但 trace 里仍会出现 `gdsc_toggle_logic`
+   轮询超时 / `... status stuck at 'off'` ✗。端口早已确认软件模式同样 stuck ✗、
+   wrapper handoff 会让整机启动即死 ✗ ⇒ 正确做法是**失败后能恢复** ✓
+   （`failed to resume from power collapse; restarting the core` ✓）。
+
+2. **恢复链被自己弄坏（本条目修的）**：`-22` 来自
+   `pm_runtime_resume_and_get(pd_dev)` —— genpd 的 `usage_count` 已为 0 时，
+   内核会打印 `Runtime PM usage count underflow!` 并返回 `-EINVAL` ✓。
+   即 `pm_runtime_put_sync(pd_dev)` 比 get **多了一次** ✗，因为
+   `iris_vpu_power_off()` 被跑了两次 ✗（关闭会话的 `iris_core_deinit()`
+   与 PM 路径 ✓），伴随 `video_cc_*_clk already disabled` 等连锁告警 ✓。
+
+**修法**（`nabu-iris`）：给 `iris_vpu_power_off()` 加**幂等**保护 ✓ ——
+新增独立标记 `vpu_powered` ✓（**故意不复用 `vpu_suspended`** ✓：那是 PC/固件语义，
+2.4.12 里正因为复用它才把 resume 引到不通的固件重启 ✗）：
+
+- 已断电 → 直接返回 ✓（不再重复 disable 时钟 / 重复 `put` genpd ✓）
+- `iris_vpu_power_on()` 一进入就置位 ✓（部分失败也能被后续 off 收拾 ✓）
+
+**实机验证**（完整循环 ✓）：
+
+| 步骤 | 结果 |
+|---|---|
+| 解码 #1 | ok ✓ |
+| 挂起 #1 → 唤醒 | `up=1 分钟 dpms=On` ✓ |
+| 挂起 #2 → 唤醒 | `up=2 分钟 dpms=On` ✓ |
+| **解码 #2（两次唤醒后）** | **ok ✓**（恢复链跑通 ✓）|
+| `already disabled` / `usage count underflow` | **0** ✓ |
+| `power on failed` | **0** ✓ |
+| `suspend entry / exit` | **2 / 2** ✓ |
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
