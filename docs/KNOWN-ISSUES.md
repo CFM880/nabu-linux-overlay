@@ -484,6 +484,31 @@ static struct gdsc venus_gdsc = {
   - 因此**没有**采用 `qcom_iris.power_collapse=0`（那等于「VPU 一直供电」）当修法；正解就是上面的
     「失败即自动完整重启 VPU」。
 
+#### 2.4.5 2026-10-17：相机（`qcom_camss`）实测确认必须保持拉黑
+2.4.4 之后 `qcom_iris` 已恢复，剩下相机仍在黑名单里。这次把它**放开实测**，结论是**确实不能放开**，
+而且原因比以前记的更具体：
+
+- **它不再破坏 s2idle**：相机模块加载后连续挂起/唤醒正常（3 轮 `up` 递增、`dpms=On`、
+  `stuck at`=0、无 `refusing to freeze`）。也就是说 2.4.1 那条链的源头是 venus GDSC（已修），
+  不是相机。
+- **但它自己上不了电，而且会把视频一起打死**。开一次解码时同一时刻两条日志：
+  ```
+  [185.12] qcom-camss: video_open → vfe_pm_domain_on → vfe_get → vfe_set_power
+           qcom-camss ac65000.camss: Failed to power up pipeline: -5 / -22   (反复)
+  [185.12] qcom-iris: power on failed / core init failed                     ← 同一瞬间
+  ```
+  实测：**相机启用时 3/3 挂起后解码失败**；拉黑后 **12/12 正常**。→ 两者**共用电源资源**，
+  相机上电失败会连累视频。
+- 早先那条 `cam_cc_ife_lite_0_clk status stuck at 'on'` 只是同一问题的表征
+  （`clk_branch2_disable` 在 `camss_disable_clocks` 里关不掉），不是根因；该时钟的定义与
+  厂家**完全一致**，而 6.14 与 6.18 的 `camcc-sm8150.c` **逐字相同**。
+- **不是一行 flag 能修的**：厂家 DTS 给 `bps_gdsc`/`ipe_0_gdsc`/`ipe_1_gdsc` 标了
+  `qcom,support-hw-trigger`（mainline 这几个 GDSC 都没有），但**失败的是 IFE**，而厂家**也没给
+  IFE 标**该属性 —— 说明 sm8150 相机在 mainline 上的 VFE 上电链路本身就没打通。
+- **结论**：相机维持拉黑。要恢复需按 2.4.4 的方法做完整 bring-up（对比厂家
+  `sm8150-camera.dtsi` 里各 GDSC 的 `parent-supply = <&VDD_MMCX_LEVEL>`、
+  `GCC_CAMERA_AHB_CLK`、`msm-bus` 投票与 IFE/IPE 电源时序），属独立的大任务。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
