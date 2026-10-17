@@ -830,6 +830,40 @@ MVS GDSC 保持软件模式是对的，PC handoff 不可用 ✗）。
 | `power on failed` | **0** ✓ |
 | `suspend entry / exit` | **2 / 2** ✓ |
 
+#### 2.4.14 2026-10-17：触摸屏 resume 的「固件下载失败」已修；WiFi 恢复为间歇
+
+**触摸屏**：`NVT_TOUCH_SUPPORT_HW_RST = 0` ✓（没有接硬件复位 ✓）⇒ suspend 只是让
+IC 进 deep sleep ✓，固件一直还在跑 ✓ —— 而 `nvt_ts_resume()` 里**无条件**调用
+`nvt_update_firmware()` ✗ 既多余、又必然失败 ✓（IC 不在 bootloader 模式 ✓）：
+
+```
+nvt_check_fw_reset_state: error, retry=..
+nvt_download_firmware_hw_crc: nvt_check_fw_reset_state failed
+nvt_ts_resume: download firmware failed
+```
+
+改法（`nabu-touchscreen`）：把 `nvt_update_firmware()` 放进
+`#if NVT_TOUCH_SUPPORT_HW_RST` ✓（只有真复位过才重下 ✓）；**保留**后面的
+`nvt_check_fw_reset_state(RESET_STATE_REK)` ✓ —— 它不只是检查 ✓，而是把
+deep sleep 的 IC 唤醒 ✓（第一版把这条一起删了 ✗，结果挂起走不完 ✗，已纠正 ✓）。
+
+实测：resume 里不再有 `download firmware failed` ✓，`nvt_ts_resume … end` ✓，
+挂起/唤醒 1/1 ✓，触摸可用 ✓。
+
+遗留：`nvt_check_fw_reset_state` 仍会 `retry=51` 报错 ✗ 并耗时约 32 秒 ✗
+（不影响功能 ✓，但日志噪音 + resume 变慢 ✓）。
+
+**WiFi**：同一次唤醒里 NM 完整恢复 ✓：
+
+```
+dhcp4 (wlan0): state changed new lease, address=192.168.1.5
+device (wlan0): ... -> activated
+Activation: successful, device activated
+```
+
+但用户遇到的情况是 `unmanaged (reason 'unmanaged-sleeping')` 之后**再无 NM 唤醒日志** ✗
+⇒ 属于**间歇性**的 NM 睡眠/唤醒竞态 ✗（非驱动问题 ✓：驱动与 netdev 正常 ✓）。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
