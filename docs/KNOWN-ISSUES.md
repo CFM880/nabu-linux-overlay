@@ -624,6 +624,43 @@ The PixelArraySize property has been defaulted to 3280x2464
 | 预览配置 | `1632x1232-ABGR8888` | **`1640x1232-ABGR8888`** ✓ |
 | 帧率 | ~30 fps | **~60 fps** ✓ |
 
+#### 2.4.9 2026-10-17：标准 GNOME 相机卡 Loading —— 是 GStreamer 的问题，不在内核
+
+底层全通（2.4.7 / 2.4.8，`cam` 30–60fps），但**未打补丁的标准 GNOME Snapshot
+48.0.1 永远停在 Loading**。定位过程与结论：
+
+- Snapshot 经 `xdg-desktop-portal` 的 Camera 接口 → PipeWire 相机节点 ✓，
+  该节点确实拿到帧（`Debayer: Processed 30 frames …`）✓，但只流一阵就停 ✗
+- `snapshot -d` + `GST_DEBUG=3` 显示卡点：
+
+```
+DEBUG aperture::viewfinder: Trying to set camerabin state to Playing   ← 之后 26s 无任何输出
+FIXME decodebin3: Re-use existing input streams if/when possible
+FIXME glcontext: wrapped context could not retrieve config
+ERROR pipewiresrc gstpipewiresrc.c:586: buffer … was not recycled
+```
+
+  ⇒ **`camerabin` 卡在异步切到 PLAYING**（viewfinder sink 无法 preroll），
+  与内核无关；`nabu-camera/camera-app/gnome-snapshot-50.0-nabu.patch`
+  正是为此打的补丁（去掉 `decodebin3`、viewfinder 直连 capsfilter、pin 前置预览分辨率、
+  180° 旋转），但**用户要求不改 Snapshot**。
+
+- **同时证伪了该补丁注释里的一个前提**：补丁说
+  "the front OV8856 (2-lane) cannot stream above ~1632x1224 — its 8 MP sensor mode
+  does not work"。**在当前内核上不成立**：
+
+```
+configuring streams: (0) 3280x2464-ABGR8888
+1006.676455 (29.48 fps) seq: 000004
+1006.844057 (29.80 fps) seq: 000009        ← 前置 8MP 稳定 30fps
+camss errors = 0
+```
+
+  所以「8MP 不能流」不是内核缺口，**不需要也不能在内核里修**。
+
+**结论**：内核侧相机工作已完成；要让**标准** Snapshot 出预览，要动的是 userspace 的
+GStreamer 链路（`decodebin3` / `pipewiresrc` 的回收语义），不是内核。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
