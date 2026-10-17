@@ -484,9 +484,22 @@ static struct gdsc venus_gdsc = {
   - 因此**没有**采用 `qcom_iris.power_collapse=0`（那等于「VPU 一直供电」）当修法；正解就是上面的
     「失败即自动完整重启 VPU」。
 
-#### 2.4.5 2026-10-17：相机（`qcom_camss`）实测确认必须保持拉黑
-2.4.4 之后 `qcom_iris` 已恢复，剩下相机仍在黑名单里。这次把它**放开实测**，结论是**确实不能放开**，
-而且原因比以前记的更具体：
+#### 2.4.5 2026-10-17：相机（`qcom_camss`）已解禁 —— 「必须拉黑」结论被推翻（旧模块造成的假象）
+**【更正 2026-10-17 晚：下面那段「必须拉黑」的结论是错的】** 旧结论来自**rootfs 里的旧
+`qcom_camss.ko` / `camcc-sm8150.ko`**（见 2.4.6 的运维要点）。换上端口当前代码编译出来的模块后实测：
+
+- **相机 + iris 共存**：连续 3 轮「VA-API 解码 → 挂起 → 唤醒 → 再解码」全部 `decode-after=ok`，
+  `Failed to power up pipeline` / `power on failed` 计数 **0**，`up` 单调递增（无重启）。
+- **相机功能**：media 图里 `ov13b10 3-0010` / `ov8856 4-0010` 已 ENABLED 链到 CSIPHY；
+  `cam -l` 列出 **Internal back camera / Internal front camera**；
+  `cam -c 1 --capture=1 --file=…` **真的出一帧**（1,314,816 字节），事后失败计数仍为 0。
+- **动作**：`qcom_camss,ov13b10,ov8856,cn3927` 已从**全部** cmdline 的 `module_blacklist` 移除。
+- **遗留（功能层）**：libcamera 报 `ov13b10/ov8856 ... Unable to get rectangle … Inappropriate
+  ioctl for device`（传感器驱动缺 selection/crop API），软件 ISP 报 `Algorithm 'Ccm' not found`；
+  不影响出帧，完整 3A / 通用拍照仍需后续补。
+
+**以下是被推翻的原始记录（保留下来，用来说明「旧模块」能造成多大的误判）**：那次放开实测
+（**用的是旧模块**）得到的结论是「确实不能放开」，原因记成：
 
 - **它不再破坏 s2idle**：相机模块加载后连续挂起/唤醒正常（3 轮 `up` 递增、`dpms=On`、
   `stuck at`=0、无 `refusing to freeze`）。也就是说 2.4.1 那条链的源头是 venus GDSC（已修），
@@ -505,9 +518,23 @@ static struct gdsc venus_gdsc = {
 - **不是一行 flag 能修的**：厂家 DTS 给 `bps_gdsc`/`ipe_0_gdsc`/`ipe_1_gdsc` 标了
   `qcom,support-hw-trigger`（mainline 这几个 GDSC 都没有），但**失败的是 IFE**，而厂家**也没给
   IFE 标**该属性 —— 说明 sm8150 相机在 mainline 上的 VFE 上电链路本身就没打通。
-- **结论**：相机维持拉黑。要恢复需按 2.4.4 的方法做完整 bring-up（对比厂家
+- **（已被上方更正推翻）当时的结论**：相机维持拉黑。要恢复需按 2.4.4 的方法做完整 bring-up（对比厂家
   `sm8150-camera.dtsi` 里各 GDSC 的 `parent-supply = <&VDD_MMCX_LEVEL>`、
   `GCC_CAMERA_AHB_CLK`、`msm-bus` 投票与 IFE/IPE 电源时序），属独立的大任务。
+
+#### 2.4.6 运维要点：内核模块在 rootfs，不在 UKI 里（这个坑踩了三次）
+`nabu-iris` / `nabu-camera` 等**内核模块安装在 rootfs 的
+`/lib/modules/<release>/kernel/...`**。只替换 UKI 只更新 initrd 副本，**运行期 modprobe 加载的仍是
+rootfs 里那份**，所以改完模块必须：
+```
+scp <module>.ko <tablet>:/tmp/
+sudo install -m0644 /tmp/<module>.ko /lib/modules/<release>/kernel/<path>
+sudo depmod -a <release>            # 或直接 make install-modules
+```
+**这个坑直接造成过三次错误结论**：iris 的「PC 恢复修复」在旧模块上测（2.4.4 一度写错）、
+相机的「必须拉黑」在旧模块上测（2.4.5 完全误判）、以及最早那轮「解码失败」。
+**判断模块是否最新**：`grep -ac "<新代码里的字符串>" /lib/modules/<release>/.../<m>.ko`，
+与 `nabu-main/artifacts/<product>/<m>.ko` 对比即可。
 
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
