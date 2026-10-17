@@ -749,6 +749,51 @@ bootloader 已经让 PLL 跑起来，所以面板一开始能亮；但 **Linux �
 - `dispcc-sm8250.c` 是 sm8250/sm8150 **共用**文件，当前改动只服务 nabu；应按
   compatible 拆分，避免影响 sm8250。
 
+#### 2.4.12 2026-10-17：第二次挂起卡死 —— iris 的 PC 恢复链是坏的，改法已回退
+
+2.4.11 修好显示 PLL 后，用户实测结果是「**第一次能唤醒 ✓，第二次不行 ✗**」。
+现场（串口）显示第二次挂起时问题**换到了 iris 那一侧**：
+
+```
+video_cc_mvs0_core_clk / video_cc_mvs1_core_clk already disabled
+video_cc_mvsc_core_clk / video_cc_iris_ahb_clk already disabled
+gcc_video_axi0_clk / gcc_video_axi1_clk / gcc_video_axic_clk already disabled
+genpd genpd:1:aa00000.video-codec: Runtime PM usage count underflow!
+```
+
+**尝试的改法（已回退）**：`iris_core.c` 在关闭会话断电后把 `vpu_suspended`
+从 `false` 改成 `true`（它正是 `iris_hfi_pm_suspend()` 的守卫），
+理由是「VPU 确实已断电，标记不该被清掉」。实测结果：
+
+- ✓ **两次挂起都能完整走完**（journal 里 `suspend entry` / `suspend exit` 各 2 次）
+- ✗ **但唤醒后解码器再也起不来**：
+
+```
+qcom-iris: power on failed
+qcom-iris: failed to resume from power collapse
+qcom-iris: restarting the core failed: -22
+qcom-iris: core init failed
+```
+
+即标记置位后，挂起路径会去走「从 power collapse 恢复 → 重新引导固件」，
+而**这条恢复链在 SM8150 上本身就是坏的**（与 2.4.2/2.4.4 的结论一致：
+MVS GDSC 保持软件模式是对的，PC handoff 不可用 ✗）。
+**用挂起换来解码功能丧失属于功能回归，因此已回退** ✓：
+`nabu-iris` 的 `iris_core.c` 恢复原样，iris 模块重装后**解码器恢复可用** ✓。
+
+**当前状态**
+
+- ✓ 显示 PLL（2.4.11）已修，**用户实测确认**：第一次休眠 → 电源键唤醒可用
+- ✗ 第二次挂起仍会卡死（根因：iris 的 PC 恢复链坏）
+
+**未决的下一步**
+
+1. **修 PC 恢复链**：查 `iris_vpu_power_on_hw()` 的 `defer_vcodec_power` 分支里
+   `pm_runtime_resume_and_get(pd_dev)` 为何返回 `-22`，以及重启 core 路径为何失败。
+2. **SM8150 上不进入 PC**：空闲时不尝试 power collapse；代价是 VPU 保持供电
+   （用户此前否过「一直供电」式的做法）。
+3. 暂不处理：第一次休眠/唤醒可用，第二次之后需重启。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
