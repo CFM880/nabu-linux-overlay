@@ -661,6 +661,43 @@ camss errors = 0
 **结论**：内核侧相机工作已完成；要让**标准** Snapshot 出预览，要动的是 userspace 的
 GStreamer 链路（`decodebin3` / `pipewiresrc` 的回收语义），不是内核。
 
+#### 2.4.10 2026-10-17：不走 portal 的取图路径 —— `libcamera-v4l2` 不可用，`cam` 可用
+
+在 2.4.9 之后评估了「让标准 V4L2 应用直接用相机」这条替代路，结论如下。
+
+**`libcamera-v4l2` 兼容层在 libcamera 0.4.0 上不可用**：
+
+- 兼容层在 `/usr/libexec/aarch64-linux-gnu/libcamera/v4l2-compat.so`，`LD_PRELOAD` 后
+  `/dev/video0` 的 `VIDIOC_ENUM_FMT` 确实返回 ISP 的 `NV12`/`P010`（96x96–8192x8192）✓
+- 但 **`VIDIOC_QUERYCAP` 没有被虚拟化**，返回的是该节点真实驱动的能力位
+  （本机 `/dev/video0`、`/dev/video1` 是 iris 的 Decoder/Encoder，`0x84204000`
+  = M2M Multiplanar），于是 ffmpeg 直接拒绝：
+  `[video4linux2,v4l2] Not a video capture device.`
+- 用 `v4l2-ctl -d /dev/video0 --stream-mmap --stream-count=12 --stream-to=…`
+  能配置但**出 0 字节** ✗
+
+**可用的路径是 libcamera 直连（`cam`）**：
+
+```
+cam -c 1 --capture=25 --file=/tmp/shot -s width=1640,height=1232
+# → configuring streams: (0) 1640x1232-ABGR8888, ~60 fps, 25 帧连续落盘
+```
+ABGR8888 在 ffmpeg 里就是 `bgra`，取最后一帧即可（AGC 约 10 帧、AWB 约 25 帧收敛）：
+
+```
+tail -c $((1640*1232*4)) /tmp/shot > last.bgra
+ffmpeg -f rawvideo -pix_fmt bgra -s 1640x1232 -i last.bgra shot.png
+```
+
+已封装为 **`nabu-camera/scripts/nabu-shot.sh`**：
+```
+nabu-shot.sh [-c 相机] [-w 宽] [-H 高] [-n 帧数] out.png
+```
+实测：25 帧、59.8 fps、`camss errors = 0`、输出 1640x1232 PNG（约 4.7 MB）。
+
+注意：libcamera 相机是**独占**的，用这条路径前要先关掉占着相机的应用
+（`pkill -x snapshot`；PipeWire 只是 probe 时短暂打开，不冲突）。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
