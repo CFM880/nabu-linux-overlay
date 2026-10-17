@@ -536,6 +536,70 @@ sudo depmod -a <release>            # 或直接 make install-modules
 **判断模块是否最新**：`grep -ac "<新代码里的字符串>" /lib/modules/<release>/.../<m>.ko`，
 与 `nabu-main/artifacts/<product>/<m>.ko` 对比即可。
 
+#### 2.4.7 2026-10-17：GNOME 相机（Snapshot）出画面 —— 两个坑，其一已修
+
+用 `cam` / GNOME Snapshot 实测相机，过程中定位到两个问题。
+
+**坑 1：`camera-tuning/*.yaml` 会让 libcamera 0.4.0 的软件 ISP 直接失效（已修）**
+
+镜像里是 libcamera **0.4.0**（Debian trixie），它的 simple IPA 只实现
+`BlackLevel / Awb / Lut / Agc`；而 `nabu-camera` 装进镜像的调参 yaml 是给
+**0.7.0** 写的，要求 `Ccm` + `Adjust`：
+
+```
+ERROR IPAModuleAlgo module.h:79         IPASoft: Algorithm 'Ccm' not found
+ERROR SoftwareIsp software_isp.cpp:133  IPASoft: IPA init failed
+```
+
+`IPA init failed` 会让软件 ISP **完全不工作**（一帧都不出），比不装调参文件更糟 ——
+不装时 libcamera 回落到自己的 `uncalibrated.yaml`，ISP 正常起来（只是没标定）。
+**`nabu-camera` `9ad56ff`** 去掉这两个 `[install]` 条目；文件保留在树里，并新增
+`camera-tuning/README.md` 说明「需要 libcamera ≥ 0.5」。
+
+**坑 2：VFE 被失败的流“卡住”后，之后所有流都 overflow（重启即恢复）**
+
+排查时反复起停流（尤其是 ISP 初始化失败的那些）之后，dmesg 开始出现：
+
+```
+qcom-camss: VFE0 IRQ: ... cfg=00000003 addr=00000000 width=0000ff01 ... inc=009a9a00
+qcom-camss: VFE0 RDI overflow: status1=00000004 violation=00000000   （每 0.5–1 ms 刷一次）
+```
+
+此时 `cam0: Capture N frames` 之后**永远收不到帧**（连 1280x720 也一样），
+而**重启后同样的命令 30fps 正常出帧**。
+
+判断要点：
+- `width/stride = 0xff01` 是上游 `WM_BUFFER_DEFAULT_WIDTH` /
+  `WM_STRIDE_DEFAULT_STRIDE` 的**正常默认值**，不是异常；真实宽高在
+  `VFE_BUS_WM_IMAGE_CFG_0`。
+- `status1` 那段判定来自端口自己加的调试代码（`dev_err_ratelimited`），
+  **“RDI overflow” 这个标签并不可靠**；判断有没有帧应该看 `cam` 输出的
+  `seq:` 行或文件是否落盘。
+
+→ **相机调试时流失败后先重启再测**，否则会把 VFE 的残留状态当成新 bug。
+
+**验证结果（干净启动后）**
+
+```
+configuring streams: (0) 1632x1232-ABGR8888
+35.99 (30.08 fps) cam0-stream0 seq: 000001 bytesused: 8042496
+```
+
+- ISP 路径稳定 **~30 fps**；raw 路径（`3272x2464-RGB888`）同样 ~30 fps
+- AGC 约 **10 帧**收敛（第 0 帧很暗），AWB 约 **25 帧**收敛（前十几帧明显偏绿）
+- GNOME Snapshot 48.0.1 能启动、经 `xdg-desktop-portal` → PipeWire 打开相机，
+  dmesg 无 overflow / 失败
+
+**仍存在的功能缺口（不影响出画面）**
+
+- **颜色未标定**：0.4.0 没有 `Ccm` 算法，端口的 CCM 用不上（见坑 1）
+- 传感器驱动缺 selection/crop API → libcamera 报
+  `'ov8856 4-0010': The sensor kernel driver needs to be fixed`、
+  `Unable to get rectangle … Inappropriate ioctl for device`，
+  `PixelArraySize` 被默认成 4208x3120 / 3280x2464
+- `IPASoft: Failed to create camera sensor helper` 是 **cosmetic**（见
+  `nabu-camera/patches/README.md`），AGC 走 fallback，行为一致
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
