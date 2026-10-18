@@ -864,6 +864,44 @@ Activation: successful, device activated
 但用户遇到的情况是 `unmanaged (reason 'unmanaged-sleeping')` 之后**再无 NM 唤醒日志** ✗
 ⇒ 属于**间歇性**的 NM 睡眠/唤醒竞态 ✗（非驱动问题 ✓：驱动与 netdev 正常 ✓）。
 
+#### 2.4.15 2026-10-18：修掉 resume 的时钟引用泄漏；偶发挂起仍未定位
+
+**已修（`nabu-display` `780bc26`）**：端口把 `msm_mdss` 换成了
+`pm_runtime_force_suspend/resume`（注释称"和 DPU 用同一对"）✗ ⇒ mdss 与 DPU
+每次 resume 都各自使能同一套显示时钟 ⇒ 对比一次「挂起前 → 唤醒后」的
+`/sys/kernel/debug/clk/clk_summary` 可见计数普遍 +1：
+
+```
+disp_cc_mdss_pclk0_clk / pclk1_clk / byte0_intf_clk   1 -> 2
+gcc_qupv3_wrap_0_s_ahb_clk / m_ahb_clk                1 -> 2
+bi_tcxo                                              20 -> 21
+```
+
+改回 mainline 的 `mdss_pm_suspend/mdss_pm_resume` 后，显示与 QUP 的计数**不再变化** ✓；
+只剩 `bi_tcxo` 仍 +1 ✗，它来自 `17300000.remoteproc`（ath10k ✓）。
+overlay 文件现与上游**逐字节相同** ✓。
+
+**仍未定位**：`pm_test=devices` 下仍会挂死 ✗（而且这次**第一轮**就挂 ✗，
+不再是"第一次必成功"✓）⇒ 属**竞态** ✗，与 mdss 那处无关 ✓。
+
+**已排除**：相机（整组模块黑名单下依然挂 ✗）。
+
+**已确认的取证限制（重要）**：
+
+- `pstore/ramoops` **不可用** ✗：配置与 DTS 都在（`ramoops@b0000000` 4MB ✓、
+  `printk: legacy console [ramoops-1] enabled` ✓），但受控 panic 后
+  `/sys/fs/pstore/` 仍为空 ✗ ⇒ **重启会清 DDR** ✓。
+- 挂死发生在设备挂起阶段 ⇒ **任务已被冻结** ✗ ⇒ journald 写不了 ✗、
+  USB 串口随设备挂起 ✗、面板也已挂起（屏幕全黑 ✗）⇒ **没有任何活通道** ✗。
+- `pm_test=devices` 可以"不真正睡眠"地复现 ✗，但挂死时同样失去所有通道 ✗。
+
+**下一步建议**：
+
+1. 按"整类卸载/黑名单"继续二分（相机已排除 ✓；下一个：`ath10k_snoc`、
+   `i2c_qcom_cci`、`qcom_slim`/`wcd934x`、`pmic-typec`）。
+2. 或按 probe 顺序倒序核对每个驱动的 `.suspend/.resume` 对称性
+   （iris ✓、mdss ✓ 已修；其余逐个看）。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
