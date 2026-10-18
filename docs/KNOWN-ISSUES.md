@@ -917,6 +917,31 @@ overlay 文件现与上游**逐字节相同** ✓。
 2. 或按 probe 顺序倒序核对每个驱动的 `.suspend/.resume` 对称性
    （iris ✓、mdss ✓ 已修；其余逐个看）。
 
+#### 2.4.16 2026-10-18：camcc 的 PLL 配置同样是 sm8250 的值（已修）
+
+现象：相机在**任何一次挂起/恢复之后**就失效 ✗ —— `cam -l` 从 2 台变 0 台：
+
+```
+qcom-camss: clock enable failed: -110
+  camss_enable_clocks <- csiphy_set_power
+MediaDevice: Failed to setup link 'msm_csid0'[1] -> 'msm_vfe0_rdi0'[0]: timed out
+```
+
+`-110` 是 ETIMEDOUT ⇒ `clk_prepare()` 里 PLL 锁不上 ✓。与 2.4.11 的显示 PLL
+**完全同源** ✓：`camcc-sm8150.c` 里 `cam_cc_pll0/pll1/pll3/pll4` 的
+`test_ctl_hi_val` 是 **`0x00000000`**（sm8150 的 **v2** 值 ✗），而厂家 v1 配置是
+**`0x00000002`** ✓（`pll2` 两边都是 `0x4000` ✓）。nabu 是 v1 芯片 ✓
+（显示 PLL 用 v1 值修好就是证据 ✓）。
+
+改法（`nabu-camera` `c3bede2`）：新增
+`kernel-overlay/drivers/clk/qcom/camcc-sm8150.c`，把四处改成 `0x2` ✓。
+
+验证：一次 `pm_test=devices` 挂起/恢复后，**相机仍枚举到 2 台** ✓
+（修复前会掉到 0 ✗）。
+
+**注意**：这个修复**没有**解决偶发的设备挂起挂死 ✗ —— 第 2 轮 `pm_test`
+仍然挂死 ✓，说明那是另一个问题 ✓。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
