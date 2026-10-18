@@ -866,6 +866,21 @@ Activation: successful, device activated
 
 #### 2.4.15 2026-10-18：修掉 resume 的时钟引用泄漏；偶发挂起仍未定位
 
+**【更正 2026-10-18 晚：这个修复已回退（`nabu-display` `25adb51`）】**
+
+A/B 实测（`pm_test=devices`，不真正睡眠 ✓）：
+
+| mdss 版本 | 结果 |
+|---|---|
+| 端口版本（`pm_runtime_force_*` ✓） | **第 1 轮正常返回** ✓ |
+| 上游版本（本次"修复" ✗） | **第 1 轮就挂死** ✗ |
+
+⇒ 回退到上游写法虽然**消掉了时钟计数泄漏** ✓，却让偶发挂起**明显更糟** ✗
+（挂起 ≫ 少量时钟泄漏 ✓）。因此**已回退，保留端口版本** ✓。
+
+泄漏本身仍然是真的 ✗，但要**在不改变 mdss 参与系统睡眠方式的前提下**去修 ✓
+（例如显式 balance 时钟，而不是整段跳过 mdss 的那一次 transition ✓）。
+
 **已修（`nabu-display` `780bc26`）**：端口把 `msm_mdss` 换成了
 `pm_runtime_force_suspend/resume`（注释称"和 DPU 用同一对"）✗ ⇒ mdss 与 DPU
 每次 resume 都各自使能同一套显示时钟 ⇒ 对比一次「挂起前 → 唤醒后」的
