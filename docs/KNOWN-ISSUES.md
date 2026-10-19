@@ -1380,6 +1380,35 @@ ls  /sys/class/typec/port0-partner/    → （空）           ✗（没识别�
 （`serial-debug` 黑名单只去掉了 `ln8000_charger` ✓；`pmic-typec`（`c440000.spmi:pmic@2:typec@1500` ✓）
 与 `i2c@890000/typec-mux@43` ✓ 仍在管事 ✗）—— 记下待办 ✓。
 
+#### 2.4.25 2026-10-19：唤醒后触屏失效 —— NVT resume 不再重下固件（已修，已装，待唤醒验证）
+
+串口取证（`console=ttyGS0` + getty ✓，全程只走串口 ✓）：
+
+```
+nvt_ts_resume 1784: resume start
+nvt_check_fw_reset_state 537: error, retry=51, buf[1]=0x00 0x00 0x00 0x00 0x00
+nvt_ts_resume 1844: end                     ← 检查失败但没有任何补救 ✗
+```
+
+⇒ 2.4.14 删掉"无条件重下固件"是对的 ✓，但它把**失败分支**也一起丢了 ✗：
+resume 时 IC 状态读回全 0 ✗、reset-state 检查失败 ✗ ⇒ 控制器一直死着 ✗，
+只有 `modprobe -r/-r nt36523_ts` 才能救回来 ✓（实测重下固件只要 **167 ms** ✓，
+`fw_ver=0x35` ✓、`PID=5953` ✓、`input11/12` 重新注册 ✓）。
+
+**修复（`nabu-touchscreen` `6459da9`）**：`nvt_ts_resume()` 里**只在检查失败时**
+`nvt_update_firmware()` + 再检查一次 ✓（正常路径不变 ✓）。已编进 `nt36523_ts.ko` ✓
+并用串口 `dd`+base64 传上去装好 ✓（`MD5_OK`/`INSTALLED`/`RELOADED` ✓）。
+
+**待验证 ✗**：装好后触发的那次 `systemctl suspend -i` **没有醒过来** ✗
+（串口停在 `PM: suspend entry (s2idle)` ✗、SSH/网络都没回来 ✗）⇒ 自动重下那条路
+还没在**成功的唤醒**里看到日志 ✗。下次唤醒成功时看 `reloading firmware` 行即可 ✓。
+
+**顺带记下两条环境事实 ✓**：
+- **串口现在可用且可登录** ✓（Type-C gadget = `console=ttyGS0` + getty ✓，
+  主机侧 `/dev/ttyACM0` ✓，抓取器 `tools/nabu-serial-console.sh` ✓）——这是以后
+  所有崩溃/唤醒取证的首选通道 ✓；但它在 dwc3 挂起时会消失 ✗（挂死瞬间仍看不到 ✗）。
+- 主机与平板换到 `192.168.1.0/24` ✓（平板 `192.168.1.5` ✓、构建机 `192.168.1.13` ✓）。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
