@@ -31,7 +31,9 @@
 #   NABU_UP_WAIT  max seconds to wait for WiFi to come back (default 900; a
 #                 wedge never comes back, so keep someone next to the tablet)
 #   NABU_DOWN_WAIT max seconds to wait for the tablet to leave the network
-#                 after requesting a suspend (default 60)
+#                 after requesting a suspend (default 60); the request goes
+#                 through `systemctl suspend -i` and its output lands in
+#                 /tmp/nabu-ab-suspend.log on the tablet
 
 set -u
 
@@ -124,8 +126,11 @@ for i in $(seq 1 "$rounds"); do
 	[ -n "$before" ] || { say "round $i: no boot_id - stopping"; break; }
 
 	# Fire and forget: the SSH session dies with the WiFi, the suspend does not.
-	root "setsid nohup sh -c 'rtcwake -m no -s $WAKE; systemctl suspend' \
-	      >/dev/null 2>&1 < /dev/null &" >/dev/null 2>&1
+	# -i ignores the sleep inhibitors GNOME/NetworkManager/UPower install,
+	# which otherwise make logind refuse the request (2026-10-19: 7 inhibitors
+	# turned every round into a silent no-op); keep the output visible.
+	root "setsid nohup sh -c 'rtcwake -m no -s $WAKE; systemctl suspend -i' \
+	      >/tmp/nabu-ab-suspend.log 2>&1 < /dev/null &" >/dev/null 2>&1
 
 	if wait_down "$DOWN_WAIT"; then
 		: # off the network: suspend (or wedge) is in progress
