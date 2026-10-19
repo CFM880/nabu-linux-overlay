@@ -1,0 +1,1 @@
+savedcmd_nabu-pwrkey-wake.ko := aarch64-linux-gnu-ld -r -EL  -maarch64elf -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T /home/cfm880/sources/nabu-linux/nabu-main/out/scripts/module.lds -o nabu-pwrkey-wake.ko nabu-pwrkey-wake.o nabu-pwrkey-wake.mod.o .module-common.o

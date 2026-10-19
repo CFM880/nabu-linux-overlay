@@ -1,0 +1,1 @@
+./nabu-pwrkey-wake.o
