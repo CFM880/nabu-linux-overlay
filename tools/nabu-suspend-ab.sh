@@ -13,6 +13,15 @@
 #   freezer-bt        pm_test=freezer, Bluetooth adapter powered on
 #   devices-nobt      pm_test=devices, bluetooth.service stopped (2.4.17 control)
 #   freezer-nobt      pm_test=freezer, bluetooth.service stopped
+#   real-bt           a real suspend (systemctl suspend), adapter powered on
+#   real-nobt         a real suspend, bluetooth stopped
+#
+# The real-* variants re-launch themselves under setsid: NetworkManager drops
+# the WiFi on the way into a real suspend, so the caller's session does not
+# survive the round.  An RTC alarm (NABU_SUSPEND_AB_WAKE seconds, default 30)
+# brings the tablet back; without it the machine would sleep until the power
+# key.  Real suspends are the closest thing to the reported reproducer and the
+# only variants that run systemd's sleep hooks.
 #
 # `pm_test=freezer` runs suspend_prepare() (console, the PM_SUSPEND_PREPARE
 # notifier chain - where the BT stack's hci_suspend_notifier lives - and the
@@ -49,6 +58,7 @@ set -u
 
 LOG_DIR=${NABU_SUSPEND_AB_LOGDIR:-/var/log/nabu-suspend-ab}
 BETWEEN_ROUNDS=${NABU_SUSPEND_AB_DELAY:-5}
+WAKE=${NABU_SUSPEND_AB_WAKE:-30}
 DD=/sys/kernel/debug/dynamic_debug/control
 
 usage() { sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
@@ -63,15 +73,31 @@ say() { printf '%s\n' "$*"; }
 variant=${1:-}
 rounds=${2:-10}
 [ -n "$variant" ] || usage
-case "$variant" in devices-bt|freezer-bt|devices-nobt|freezer-nobt) ;; *) usage ;; esac
+case "$variant" in devices-bt|freezer-bt|devices-nobt|freezer-nobt|real-bt|real-nobt) ;; *) usage ;; esac
 case "$rounds" in ''|*[!0-9]*) die "rounds must be a number" ;; esac
 
 stage=${variant%%-*}
-case "$stage" in devices|freezer) ;; *) die "bad stage" ;; esac
+case "$stage" in devices|freezer|real) ;; *) die "bad stage" ;; esac
 want_bt=yes
 case "$variant" in *-nobt) want_bt=no ;; esac
+# A real suspend takes the whole system down (NetworkManager disconnects the
+# WiFi first), so the round loop must survive its own session: it is run under
+# setsid and reports through the log file.
+[ "$stage" = real ] && [ "${NABU_SUSPEND_AB_DETACHED:-}" != 1 ] && {
+	mkdir -p "$LOG_DIR"
+	NABU_SUSPEND_AB_DETACHED=1 setsid nohup "$0" "$variant" "$rounds" \
+		>>"$LOG_DIR/$variant.detached.log" 2>&1 &
+	say "real suspend: re-launched detached (pid $!), see $LOG_DIR/$variant.detached.log"
+	exit 0
+}
 
-qca_setup_ok() { dmesg 2>/dev/null | grep -q 'QCA setup on UART is completed'; }
+qca_setup_ok() {
+	# dmesg's ring buffer may already have rotated (the iris 2 s retry fills
+	# it), so ask journald for the whole boot first.
+	journalctl -k -b 0 --no-pager 2>/dev/null |
+		grep -q 'QCA setup on UART is completed' && return 0
+	dmesg 2>/dev/null | grep -q 'QCA setup on UART is completed'
+}
 adapter_powered() { busctl get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Powered 2>/dev/null | grep -q true; }
 
 enable_debug() {
@@ -155,11 +181,21 @@ main() {
 
 	setup
 	enable_debug
+	# NABU_SUSPEND_AB_PMTEST lets a real systemd suspend stop at an earlier
+	# pm_test stage (e.g. freezer): that keeps systemd's sleep hooks and
+	# NetworkManager handling in the path while never suspending a device.
+	[ "$stage" = real ] && echo "${NABU_SUSPEND_AB_PMTEST:-none}" > /sys/power/pm_test
 	start_bt_traffic
 	trap stop_bt_traffic EXIT
 
 	say ""
-	say "Starting $rounds rounds of pm_test=$stage ($variant)."
+	if [ "$stage" = real ]; then
+		say "Starting $rounds real suspends ($variant), RTC wake in ${WAKE}s."
+		say "NetworkManager drops the WiFi on the way in (DEAUTH_LEAVING), so this"
+		say "session dies: watch $log from the tablet console or re-connect after."
+	else
+		say "Starting $rounds rounds of pm_test=$stage ($variant)."
+	fi
 	say "A wedged round needs a long press; then reboot and re-run this variant,"
 	say "counting the rounds that completed.  Afterwards, on the fresh boot:"
 	say "    journalctl -k -b -1 | grep -E 'Bluetooth|hci_uart_qca|PM:'"
@@ -171,7 +207,17 @@ main() {
 		kmsg "round $i/$rounds starting (variant $variant)"
 		printf '\n######## round %d/%d (%s) %s ########\n' \
 			"$i" "$rounds" "$variant" "$(date +%FT%T)" >> "$log"
-		if echo mem > /sys/power/state 2>>"$log"; then
+		if [ "$stage" = real ]; then
+			rtcwake -m no -s "$WAKE" >/dev/null 2>&1 ||
+				say "warning: could not arm the RTC wake alarm"
+			# The echo is a backstop in case systemd's job fails.
+			{ systemctl suspend || echo mem > /sys/power/state; } 2>>"$log"
+			rc=$?
+		else
+			echo mem > /sys/power/state 2>>"$log"
+			rc=$?
+		fi
+		if [ "$rc" = 0 ]; then
 			ok=$((ok + 1))
 			kmsg "round $i/$rounds completed"
 			say "round $i/$rounds: OK"

@@ -1214,6 +1214,70 @@ freeze **之前** ✓，因为 journald 是用户态 ✓，被冻住后就不再
 前提 ✗：**必须在一台 `QCA setup on UART is completed` 的 boot 上跑** ✓（否则只会看到
 3 s 中止 ✗，永远复现不出挂死 ✓）—— 工具会在固件没下来时直接拒绝运行 `*-bt` 变体 ✓。
 
+#### 2.4.21 2026-10-19：`pm_test` 阶段二分完成 —— **只有真挂起才复现**，挂死在 freeze 之后、看门狗自动重启
+
+今天在实机（`6.14.11-nabu-full`，192.168.0.67，`~/nabu-suspend-ab.sh` +
+`~/nabu-suspend-stackwatch.sh`）把 2.4.15/2.4.17 的复现前提彻底验了一遍 ✓。
+
+**1) `pm_test` 不复现 ✗（四个阶段都试过 ✓）**
+
+| 变体 | 轮数 | 结果 |
+|---|---|---|
+| `real-bt` + `NABU_SUSPEND_AB_PMTEST=freezer`（走 systemd ✓）| 30 | **28/30 返回** ✓（0 挂死 ✓）|
+| `real-bt` + `NABU_SUSPEND_AB_PMTEST=platform` | 20 | **20/20 返回** ✓ |
+| `devices-bt`（空闲 + 后台 `scan on` 流量）| 40 | **40/40 返回** ✓ |
+| `freezer-bt`（直接 `echo mem`）| 10 | **10/10 返回** ✓ |
+| **`real-bt`（真 s2idle ✓）** | ~10 次 | **挂了 2–3 次** ✗ |
+
+⇒ 2.4.15/2.4.17 里"`pm_test=devices` 可以复现"**是错的** ✗：`pm_test=devices`
+把"设备挂起 + 恢复"整段都跑完了（40 轮 ✓）却一次不挂 ✗ ⇒ **挂死点不在设备挂起回调里** ✗，
+而在**只有真 s2idle 才会走到的那一段**（进入最深 idle / 唤醒路径）✓✓。
+复现配方 ✓：真 `systemctl suspend`（systemd 全流程：`nabu-sensors-suspend` →
+NM `PrepareForSleep` 断 WiFi → 内核）+ **BT 适配器已上电** + 后台 `bluetoothctl scan on`；
+每次约 10–30% ✓。
+
+**2) 挂死在 freeze **之后** ✓（这次有硬证据 ✓）**
+
+`/dev/watchdog0`（`qcom_wdt`）由 systemd 运行时看门狗在踢 ✓；挂死后 **PID 1 再也踢不了** ✓
+⇒ 看门狗 **~30 s 后自动复位整机** ✓ ⇒ **当时用户态是冻结的** ✓（freeze 已发生 ✓）。所以：
+- journal 停在 `PM: suspend entry (s2idle)` + 一串 `hci0 Event packet` ✗（journald 被冻 ✓）；
+- **用户态任何工具都救不了** ✗（`nabu-suspend-stackwatch.sh` 也被冻住 ✓，
+  且 60 s 阈值慢于看门狗 ✓）—— 2.4.15 的"无任何活通道"✗ 至此有了机制解释 ✓；
+- **好消息 ✓**：**不用长按了** ✓ —— 每次挂死约 30–60 s 后平板自己重启回来 ✓
+  （A/B 成本从"人工长按"降到"等一分钟"✓）。
+
+**3) 排除"蓝牙作为唤醒源"✗**
+
+- `/sys/class/bluetooth/hci0/power/wakeup` **不存在** ✗ ⇒ hci0 不是唤醒源 ✓；
+- `c8c000.serial/power/wakeup` = `disabled` ✓（2.4 的 udev 规则 ✓）；
+  `msmgpio 46 Edge c8c000.serial:wakeup` 中断计数 **0** ✓；
+- `wakeup_sources` 无 hci/bt/serial 条目 ✓；
+- 而 `GICv3 617 qcom_geni_serial_uart0` 计数 1043 ✓（BT 那条 UART 的 RX 一直在动 ✓）。
+⇒ 蓝牙与挂死的联系是 **UART 上有真实流量** ✓（扫描时尤甚 ✓），不是唤醒中断 ✗。
+
+**4) "127 ms" 继续降级 ✓**：今天 BT 上电 + 扫描时 `suspend of devices` 总耗时
+**135–285 ms** ✓（与 2.4.17 的 127 ms 同量级 ✓），而 `pm_test=devices` 40 轮不挂 ✗
+⇒ 那 135–285 ms **本身不是**挂死原因 ✓（2.4.20-B2 继续成立 ✓）。
+
+**5) 下一步：唯一可行的取证路线 ✓**
+
+挂死在 freeze + 设备挂起之后 ⇒ UFS 也已挂起 ✗、`pstore/ramoops` 又被清 ✗
+⇒ **没有任何可写的持久介质** ✗ ⇒ 只有**不随挂起消失的 console** ✓：
+
+1. cmdline 加 `console=ttyMSM0,115200` + `no_console_suspend` ✓
+   （`a90000.serial` = `/dev/ttyMSM0` ✓；见 2.4.19-§4 ✓），板上接 UART 适配器 ✓；
+2. 配齐 `pm_debug_messages` + `initcall_debug` ✓ ⇒ 卡死前最后一条
+   `PM: calling/resume of device …` 就是答案 ✓（不用打补丁 ✓）；
+3. 需要更细时临时 `pr_emerg()` 到 geni 的 `shutdown`/`startup`/ISR ✓。
+
+**备用（不用硬件 ✓）**：既然挂死会自己重启 ✓、复现率 10–30% ✓，
+可直接对候选修复做统计 A/B ✓（每变体 15–20 次真挂起比挂死率 ✓）：
+`bluetooth.service` mask（已知 0% ✓，对照 ✓）、geni `if (uport->suspended) return;` 守卫 ✓、
+`hci_qca` 睡前静默（取消全部 work + IBS 保护）✓。
+
+**工具已改 ✓**：stackwatch 的 stall 降到 20 s ✓（要快过看门狗 ✓，但只对 freeze 前的挂死有效 ✓）；
+`nabu-suspend-ab.sh` 新增 `real-bt|real-nobt` 与 `NABU_SUSPEND_AB_PMTEST=<阶段>` ✓。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
