@@ -1323,6 +1323,31 @@ WiFi 恢复影响 ✓）；顺带开 `scan on` 流量、关掉桌面闲置休眠
 **当前缓解 ✓（2026-10-19 16:2x 已在实机执行 ✓）**：`systemctl mask bluetooth.service` ✓
 （镜像本来就该 mask ✓，实机上却是 `enabled` ✗ —— 见 2.4.17 的 `customize.sh` 条目 ✓）。
 
+#### 2.4.23 2026-10-19：三组内核补丁实测全败 —— geni UART 方向排除，嫌疑转向 BT 芯片自身持有的资源
+
+**实测（每轮都是真 `systemctl suspend` + BT 上电 + 扫描流量，挂死由 boot_id 判定 ✓）**
+
+| 补丁 | 内容 | 结果 |
+|---|---|---|
+| A | `hci_ldisc.c` 加 `HCI_UART_SUSPENDING` 门 + `hci_qca` 取消全部 work/停 IBS 定时器 | **1/1 仍挂** ✗，且疑似有害（中止路径漏清标志 ⇒ BT 后面发不出包 ⇒ 固件下载失败 ⇒ 之后每次挂起都 -110 中止 ✗）；已撤 ✓ |
+| A+B | 再加 `qcom_geni_serial` 的 `resources_off` 守卫（start_tx/flush/ISR） | **1/1 仍挂** ✗ |
+| B+C | 再加"挂起时**不给 SE 断电**"（`system_state == SYSTEM_SUSPEND` 跳过 gating ✓） | **1/1 仍挂** ✗ |
+
+⇒ **geni UART（写路径/寄存器守卫/资源 gating）都不是死因** ✗。
+剩下唯一在"BT 开着"时才成立的差异是**BT 芯片自己持有资源** ✓：
+`qca_serdev_probe()` 打开 `susclk`（32 kHz ✓）并让 `vddio/vddxo/vddrf/vddch0` 四路 vreg 常开 ✓
+—— 这解释了为什么只有"mask 蓝牙"和"解绑 UART"（两者都让这些全关 ✓）稳定 ✓。
+
+**下一个验证（模块级，最快 ✓）**：在 `hci_qca.c` 的 `qca_suspend()/qca_resume()` 里
+`susclk` 关/开 ✓（编在 `hci_uart.ko` ⇒ 只换一个 .ko + modprobe ✓，不刷机不重启 ✓），
+按挂死率 A/B ✓。
+
+**顺带确认的两件事 ✓**
+- **看门狗**：`RuntimeWatchdogUSec=0`、运行时没人持有 `/dev/watchdog` ✗ ⇒ 挂死后**不会自己重启** ✗（此前"自己回来了"都是长按 ✓）。已在平板加 `/etc/systemd/system.conf.d/watchdog.conf`（`RuntimeWatchdogSec=60s` ✓）⇒ `wdctl` 报 `qcom_wdt, Timeout: 30 seconds` ✓ ⇒ 之后挂死约 30 s 自愈 ✓✓，A/B 可无人值守 ✓。
+- **唤醒后触屏失效**：与上述补丁无关 ✓（触屏走 geni **SPI**，不是 UART ✓）。属 2.4.14 的遗留面（`nvt_check_fw_reset_state` 重试 ≈32 s ✗ / resume 重下固件 ✗），需在**成功唤醒**的 journal 里看 `NVT-ts-spi` 行 ✓。
+
+**观测现状（重要 ✗）**：平板**没有物理调试 UART**（只有 Type-C ✓，CP2102 是给 ESP32 用的 ✗）⇒ gadget console 随 dwc3 一起挂 ✗ ⇒ 崩溃瞬间**没有可用通道** ✗；而 freeze 之后 UFS 也挂了 ✗、`pstore` 又被清 ✗ ⇒ 目前只能靠**统计 A/B** ✓，不能抓栈 ✓。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
