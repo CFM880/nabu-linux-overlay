@@ -20,6 +20,11 @@
 # wedge shows up in freezer-bt it is *not* a device-suspend problem at all; if
 # only devices-bt wedges, it is.
 #
+# Set NABU_SUSPEND_AB_TRAFFIC=1 to keep a Bluetooth scan running for the whole
+# run: 2.4.20 showed that the UART only reaches geni's ~127 ms cancel timeouts
+# when a TX command is in flight at suspend time, and that busy-UART state is
+# the one suspected of wedging.
+#
 # Trying to power the adapter on requires a boot in which the QCA firmware
 # download succeeded ("QCA setup on UART is completed" in the log).  This is
 # flaky on nabu (some boots the chip never answers and bluetoothd only gets
@@ -70,10 +75,13 @@ qca_setup_ok() { dmesg 2>/dev/null | grep -q 'QCA setup on UART is completed'; }
 adapter_powered() { busctl get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Powered 2>/dev/null | grep -q true; }
 
 enable_debug() {
+	# Both are needed for the per-device times: initcall_debug_report() only
+	# prints when pm_print_times is set, and that sysfs file did not take "Y"
+	# on the tablet - write "1" and read it back.
 	[ -w /sys/module/kernel/parameters/initcall_debug ] &&
-		echo Y > /sys/module/kernel/parameters/initcall_debug
-	[ -w /sys/power/pm_print_times ] && echo Y > /sys/power/pm_print_times
-	[ -w /sys/power/pm_debug_messages ] && echo Y > /sys/power/pm_debug_messages
+		echo 1 > /sys/module/kernel/parameters/initcall_debug
+	[ -w /sys/power/pm_print_times ] && echo 1 > /sys/power/pm_print_times
+	[ -w /sys/power/pm_debug_messages ] && echo 1 > /sys/power/pm_debug_messages
 	echo "$stage" > /sys/power/pm_test
 	if [ -w "$DD" ]; then
 		# The BT suspend path: notifier in hci_core.c, the command
@@ -83,7 +91,28 @@ enable_debug() {
 		done
 		say "dynamic debug: $(grep -c '=p' "$DD" 2>/dev/null) rules enabled"
 	fi
-	say "pm_test=$(cat /sys/power/pm_test) pm_print_times=$(cat /sys/power/pm_print_times 2>/dev/null) pm_debug_messages=$(cat /sys/power/pm_debug_messages 2>/dev/null)"
+	say "pm_test=$(cat /sys/power/pm_test) initcall_debug=$(cat /sys/module/kernel/parameters/initcall_debug 2>/dev/null) pm_print_times=$(cat /sys/power/pm_print_times 2>/dev/null) pm_debug_messages=$(cat /sys/power/pm_debug_messages 2>/dev/null)"
+	[ "$(cat /sys/power/pm_print_times 2>/dev/null)" = 1 ] ||
+		say "note: pm_print_times stayed off - per-device times will be missing"
+}
+
+bt_traffic_pid=
+start_bt_traffic() {
+	# Keep the adapter busy (HCI scan) so a TX command is in flight when the
+	# system suspends: that is the only state in which geni spends its ~127 ms
+	# cancel timeouts, and 2.4.20 argues it is also the state that wedges.
+	[ -n "${NABU_SUSPEND_AB_TRAFFIC:-}" ] || return 0
+	say "starting background BT scan (NABU_SUSPEND_AB_TRAFFIC set)"
+	( while :; do bluetoothctl --timeout 30 scan on >/dev/null 2>&1; done ) &
+	bt_traffic_pid=$!
+}
+
+stop_bt_traffic() {
+	[ -n "${bt_traffic_pid:-}" ] || return 0
+	kill "$bt_traffic_pid" 2>/dev/null || true
+	bluetoothctl scan off >/dev/null 2>&1 || true
+	wait "$bt_traffic_pid" 2>/dev/null || true
+	bt_traffic_pid=
 }
 
 setup() {
@@ -126,6 +155,8 @@ main() {
 
 	setup
 	enable_debug
+	start_bt_traffic
+	trap stop_bt_traffic EXIT
 
 	say ""
 	say "Starting $rounds rounds of pm_test=$stage ($variant)."
