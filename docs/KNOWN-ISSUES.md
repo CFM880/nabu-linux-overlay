@@ -975,6 +975,24 @@ MediaDevice: Failed to setup link 'msm_csid0'[1] -> 'msm_vfe0_rdi0'[0]: timed ou
 **至此**：「按电源键休眠 → 再按唤醒」链路上已知的坑都修掉了 ✓
 （显示 PLL ✓、iris 幂等 ✓、camcc PLL ✓、相机 vdig ✓、蓝牙 UART ✓）。
 
+#### 2.4.18 2026-10-19：蓝牙 UART 挂起 —— `disable_irq_nosync` 实验失败，保留「禁蓝牙」
+
+承接 2.4.17（`c8c000.serial` 的挂起卡死 ✓）。尝试过的**根治**：
+
+- 假设：`qcom_geni_serial_shutdown()` 里的 `disable_irq()` 在等 in-flight 中断 ✗。
+- 改动：换成 `disable_irq_nosync()`（ISR 已有 `uport->suspended` 早退，安全 ✓）。
+- 结果：**蓝牙保持启用时，第 2 轮 `pm_test` 依旧挂死** ✗ ⇒ 假设不成立 ✓，改动已回退 ✓
+  （`nabu-serial` 无 overlay、工作区干净 ✓）。
+
+**当前结论**：
+
+- **蓝牙关闭 = 已验证稳定** ✓（26 轮 `pm_test` + 2 次真实挂起全部通过 ✓）
+- 根因仍在 ✗：**BT 用户态栈持有 `c8c000.serial` 时，该 UART 的系统挂起会卡死** ✗
+- 下一个方向：`hci_uart` 的 serdev suspend（挂起前关闭/冲刷 UART ✓），
+  或 geni `.shutdown` 里 **TX 排空**那一段（127ms 的超时正是它 ✗）
+
+**其余所有条目均已修复** ✓ —— 唯一仍开放的就是这一条 ✗（有稳定的规避 ✓）。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
