@@ -18,7 +18,8 @@ tools/
 ├── nabu-devcdump-capture.sh    capture GPU devcoredumps before the 5-minute timeout
 ├── nabu-gpu-fault-watch.sh     classify each gpu fault against the live gem map
 ├── nabu-gpu-dump-parse.py      parse a devcoredump: fault-info / bos / pgtable / vm-log
-└── nabu-dump-search.py         search a dump for a symbol/offset
+├── nabu-dump-search.py         search a dump for a symbol/offset
+└── nabu-suspend-ab.sh          run pm_test=devices rounds per BT/UART A/B variant
 ```
 
 ## Relationship to the build
