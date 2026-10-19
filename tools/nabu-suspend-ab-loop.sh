@@ -134,10 +134,13 @@ for i in $(seq 1 "$rounds"); do
 	# -i ignores the sleep inhibitors GNOME/NetworkManager/UPower install,
 	# which otherwise make logind refuse the request (2026-10-19: 7 inhibitors
 	# turned every round into a silent no-op); keep the output visible.
-	sudov
-	timeout 20 $SSH "sudo -n setsid nohup sh -c 'rtcwake -m no -s $WAKE; \
-	      systemctl suspend -i' >/tmp/nabu-ab-suspend.log 2>&1 < /dev/null &" \
-	      >/dev/null 2>&1
+	# One session only: sudo -S reads the password from this session's stdin
+	# (the credential cache is per-tty, so a second ssh cannot use it), and
+	# systemctl suspend runs in the foreground.  The connection dies when
+	# NetworkManager takes the WiFi down, which kills the ssh client, not the
+	# suspend: logind already has the request.
+	timeout 45 $SSH "echo '$NABU_PW' | sudo -S -p '' sh -c \
+		'rtcwake -m no -s $WAKE; systemctl suspend -i'" >/dev/null 2>&1 || true
 
 	if wait_down "$DOWN_WAIT"; then
 		: # off the network: suspend (or wedge) is in progress
