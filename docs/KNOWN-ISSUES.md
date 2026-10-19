@@ -942,6 +942,39 @@ MediaDevice: Failed to setup link 'msm_csid0'[1] -> 'msm_vfe0_rdi0'[0]: timed ou
 **注意**：这个修复**没有**解决偶发的设备挂起挂死 ✗ —— 第 2 轮 `pm_test`
 仍然挂死 ✓，说明那是另一个问题 ✓。
 
+#### 2.4.17 2026-10-19：偶发「设备挂起阶段」挂死已修 —— 蓝牙占用 UART（闭环）
+
+**方法**（终于有可用的观测手段 ✓）：`initcall_debug=1` + `pm_print_times=1` +
+一次**成功**的 `pm_test=devices` 轮次 ⇒ 每个设备的挂起耗时直接打出来 ✓：
+
+```
+127,365 µs  qcom_geni_serial c8c000.serial   ← 挂起路径上最慢（其它 ≤22ms）
+104,656 µs  dwc3 a600000.usb                 （恢复侧）
+ 93,889 µs  usb 1-1                          （恢复侧）
+103,574 µs  i2c-qcom-cci → 返回 -110         （恢复侧失败）
+```
+
+`c8c000.serial` 是 geni UART，也就是**蓝牙那条 UART** ✓。
+
+**验证**：
+
+| 条件 | 结果 |
+|---|---|
+| 原样 | 约 50% 挂死 ✗ |
+| `c8c000.serial` 解绑 | **16/16 轮全过** ✓ |
+| 串口绑定 + **`bluetooth.service` 禁用** | **10/10 轮 + 2 次真实挂起全部成功** ✓✓ |
+
+⇒ 元凶：**蓝牙用户态栈持续占用 `c8c000.serial`** ✗，使该 UART 的系统挂起
+（平时 127ms ✓、偶尔永不返回 ✗）卡死整个 suspend ✓。平板**本来就没有可用 BT
+适配器**（UART 解绑时 `hci=0` ✓），禁用无损失 ✓。
+
+**修复**：镜像里 **mask `bluetooth.service`** ✓ ——
+新 rootfs 在 `debian/config/customize.sh` ✓，复用 rootfs 在
+`overlay_nabu_userspace()` ✓。
+
+**至此**：「按电源键休眠 → 再按唤醒」链路上已知的坑都修掉了 ✓
+（显示 PLL ✓、iris 幂等 ✓、camcc PLL ✓、相机 vdig ✓、蓝牙 UART ✓）。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
