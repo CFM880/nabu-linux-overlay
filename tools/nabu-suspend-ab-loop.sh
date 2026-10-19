@@ -58,6 +58,11 @@ root() {
 
 up() { timeout 6 $SSH 'true' >/dev/null 2>&1; }
 
+# Cache/refresh the sudo credential; the round then uses `sudo -n`, so the
+# backgrounded command needs no stdin (a `</dev/null` on a `sudo -S` call was
+# silently swallowing the password and killing every round).
+sudov() { timeout 25 $SSH "echo '$NABU_PW' | sudo -S -p '' -v" >/dev/null 2>&1; }
+
 boot_id() { timeout 20 $SSH 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null; }
 
 wait_up() {
@@ -129,8 +134,10 @@ for i in $(seq 1 "$rounds"); do
 	# -i ignores the sleep inhibitors GNOME/NetworkManager/UPower install,
 	# which otherwise make logind refuse the request (2026-10-19: 7 inhibitors
 	# turned every round into a silent no-op); keep the output visible.
-	root "setsid nohup sh -c 'rtcwake -m no -s $WAKE; systemctl suspend -i' \
-	      >/tmp/nabu-ab-suspend.log 2>&1 < /dev/null &" >/dev/null 2>&1
+	sudov
+	timeout 20 $SSH "sudo -n setsid nohup sh -c 'rtcwake -m no -s $WAKE; \
+	      systemctl suspend -i' >/tmp/nabu-ab-suspend.log 2>&1 < /dev/null &" \
+	      >/dev/null 2>&1
 
 	if wait_down "$DOWN_WAIT"; then
 		: # off the network: suspend (or wedge) is in progress
