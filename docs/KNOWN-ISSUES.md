@@ -1077,34 +1077,24 @@ BT 栈仍有一个在飞/待跑的 UART 写落到寄存器上 ⇒ interconnect �
 `console=tty0 console=ttyMSM0,115200 no_console_suspend` ✓
 （`serial-debug` 那份已经带 `no_console_suspend pm_debug_messages` ✓），板上接 UART 适配器 ✓。
 代价是这个口在挂起期间一直供电 ✓（调试期可接受 ✓）。
-`c8c000.serial` 是 `hsuart0` ⇒ **`/dev/ttyHS0`** ✓。
+**`c8c000.serial` 是 `hsuart0`** —— 但 **`/dev/ttyHS0` 根本不存在** ✗（实机核实，
+见 2.4.20）：它挂在 **serdev** 上，serdev 只创建 tty/class 设备、**不建 `/dev` 节点** ✗
+（`/sys/class/tty/` 里也没有 `ttyHS0`）✓ ⇒ **用户态完全够不到这条 UART** ✓
+（唯一能打开它的是 `hci_uart` 自己）✓。
 
-**5) A/B 工具（本轮交付）**
+**5) A/B 工具（本轮交付，见 2.4.20 的修订版 ✓）**
 
-`tools/nabu-suspend-ab.sh <variant> [rounds]` ✓ —— 每个变体跑 N 轮 `pm_test=devices` ✓，
-每轮前后往 `/dev/kmsg` 打标记 ✓，结束时汇总内核日志里的
-`Unable to drain transmitter` / `M_CMD_ABORT_EN not set` / `TX DMA reset failed` /
-`Failed to send SLEEP` / 各设备挂起耗时 ✓。挂死那轮脚本检测不到 ✗（整机没了 ✓）：
-长按重启后**再跑同一个变体**，数通过了多少轮 ✓。
+`tools/nabu-suspend-ab.sh <variant> [rounds]` ✓ —— 每轮前后往 `/dev/kmsg` 打标记，
+结束时汇总内核日志里的 QCA/geni/各设备挂起耗时 ✓；挂死那轮脚本检测不到 ✗（整机没了 ✓）：
+长按重启后**再跑同一个变体**，数通过了多少轮 ✓。变体见 2.4.20 的最终表 ✓
+（早先设想的 `bt-stop-open` / `qca-unbind-open` / `bt-nocrtscts` **不可行** ✗：
+没有 `/dev/ttyHS0` 可以"持住"或改 termios ✓）。
 
-| 变体 | 环境 | 假设的预测 |
-|---|---|---|
-| `baseline` | 蓝牙正常运行 | 约 50% 挂死 ✗ |
-| `bt-masked` | stop + mask（2.4.17 稳定配置） | 全过 ✓ |
-| `bt-stop` | 仅 stop | 全过 ✓（无 IBS 流量） |
-| `bt-stop-open` | stop + 用户态持住 `/dev/ttyHS0` | **全过** ⇒ 光"端口 open"不够 ✓（假设成立） |
-| `qca-unbind-open` | 解绑 `hci_uart_qca` + 持住 tty | 全过 ✓ ⇒ 必须要有 qca 代码参与 ✓ |
-| `bt-nocrtscts` | 蓝牙运行但 tty `-crtscts` | 若**全过** ⇒ 触发条件是 CTS 卡住的 SE TX DMA ✗（则改走 geni 侧） |
+**6) 下一步（见 2.4.20 的修订 ✓）**
 
-**6) 下一步（决定性一步，最便宜 ✓）**
-
-一行临时守卫：`qcom_geni_serial_start_tx_dma()`（以及 `set_termios()`）开头
-`if (uport->suspended) return;` ✓ —— 与 ISR 里既有的 `uport->suspended` 检查对齐 ✓。
-若 20 轮 `baseline` 全过 ⇒ **假设成立** ✓，于是正式修在 BT 侧（`hci_qca`：
-把 `ws_tx_vote_off`/`ws_rx_vote_off` 一并 `cancel_work_sync`；给
-`hci_ibs_tx_idle_timeout` 等所有会发包的定时器/work 加 `QCA_SUSPENDING` 保护；
-`hci_serdev` 加挂起钩子，挂起期间让 `hci_uart_tx_wakeup()` 直接返回 ✓）。
-若仍挂 ⇒ 假设不成立 ✗，挂死在 geni 自身路径里，回到 `pm_print_times` + `ttyMSM0` 观测 ✓。
+早先设想的"一行守卫 `if (uport->suspended) return;`"仍是候选 ✓，但**先做
+`pm_test` 阶段二分**（`freezer` vs `devices`）✓ —— 它能先判定挂死到底在不在这儿 ✓，
+而 2.4.20 的实机证据显示"挂死在设备挂起阶段"这个前提**并没有被验证过** ✗。
 
 **落点待定**：现在**没有任何模块**拥有 `drivers/tty/serial` 或 `drivers/bluetooth`
 （`nabu-serial` 明确无 overlay ✗）⇒ 定下正式修法后，要么扩展 `nabu-platform` 的
@@ -1119,6 +1109,110 @@ flush` ✓（"挂起时若正在 TX DMA 去 flush ⇒ UART 卡死反复发坏帧
 runtime-suspend" ✓ —— 与 2.4.19 同源的问题面，将来升 7.2 时要一起复核 ✓。
 
 **规避不变 ✓**：镜像里仍然 **mask `bluetooth.service`** ✓（26 轮 + 2 次真实挂起全过 ✓）。
+
+#### 2.4.20 2026-10-19：实机现状取证（`6.14.11-nabu-full`，192.168.0.67）+ 修正 2.4.17/2.4.19 的两个前提
+
+设备重新联网后（`ssh cfm880@192.168.0.67`，内核 `6.14.11-nabu-full` ✓，
+cmdline 带 `console=ttyGS0 no_console_suspend pm_debug_messages ignore_loglevel` ✓）
+把 2.4.17/2.4.19 的前提逐条核实，**有两条不成立** ✗：
+
+**A. `/dev/ttyHS0` 不存在 ✗（2.4.19 的 A/B 因此不成立）**
+
+```
+crw-rw---- root dialout 241,0 /dev/ttyMSM0     ← a90000（geni-debug-uart, serial0）✓
+crw------- root tty     237,0 /dev/ttyGS0      ← USB gadget console ✓
+                                              ← 没有 /dev/ttyHS0 ✗
+/sys/bus/serial/devices/serial0-0 → compatible qcom,wcn3991-bt，driver hci_uart_qca ✓
+```
+`hsuart0 = &uart13` ⇒ tty 名确实该是 ttyHS，但 **serdev 不注册 `/dev` 节点** ✓
+（`/sys/class/tty/` 里也没有）⇒ 用户态**无法**把 BT 那条 UART 打开或改 termios ✗
+⇒ 2.4.19 设想的 `bt-stop-open` / `qca-unbind-open` / `bt-nocrtscts` 三个变体**做不到** ✗，
+已从工具里删掉 ✓。
+
+**B. "蓝牙开启 → 约 50% 挂死"在**今天这几次启动**上不是这样 ✗**
+
+今天这台平板在两种状态之间摇摆 ✓（**绝大多数 boot 芯片是好的** ✓，
+boot 0 是例外 ✗）：
+
+| boot | QCA 固件（`QCA setup on UART is completed`）| 挂起行为 |
+|---|---|---|
+| -5 … -1 | **都有** ✓（`QCA SOC Version :0x40010320` ✓）| boot -2/-3：连续 4 轮**成功** ✓（`suspend of devices complete after 37–57 ms` ✓）；boot -3 最后一轮（12:53:12）失联 ✗ |
+| 0（13:15，当前）| **没有** ✗：`command 0xfc00 tx timeout` ×3 + `Retry BT power ON:1..3` + `Opcode 0x0c03 failed: -110` | **每次挂起都在 3.0 s 后中止** ✗ |
+
+当前 boot 的每一次挂起都是**确定性中止**而不是挂死 ✓：
+
+```
+PM: suspend entry (s2idle)
+Freezing user space processes            (+0.42 s，因为适配器没上电 ✓)
+hci_uart_qca serial0-0: PM: dpm_run_callback(): qca_suspend [hci_uart] returns -110
+Bluetooth: hci0: SSR or FW download time out
+PM: suspend of devices aborted after 3007.860 msecs
+PM: suspend exit
+```
+⇒ 根因是 `qca_suspend()` 里那句
+`wait_on_bit_timeout(&qca->flags, QCA_IBS_DISABLED, TASK_UNINTERRUPTIBLE, FW_DOWNLOAD_TIMEOUT)`
+✓：**固件下载失败后 `QCA_IBS_DISABLED` 永远不复位** ✗ ⇒ 该 boot 之后**再也挂不起来** ✓
+（`/sys/class/bluetooth/hci0` 在、`Powered: no`、`PowerState: on`、
+Controller `AD:5A:00:00:00:21`、Manufacturer 0x001d、Version 0x0b ✓）。
+这本身是**另一个 bug**（"BT 开着就再也睡不了" ✗），和"挂死"不是一回事 ✓，
+但在实机上很容易被当成同一个现象 ✗。
+
+**B2. 顺带修正 2.4.17 的"127 ms"含义 ✓**：boot -2/-3 里适配器**上电**的那几轮，
+**整段** `suspend of devices` 只花 37–57 ms ✓ ⇒ 那时 `c8c000.serial` 并没有 127 ms ✓。
+`qcom_geni_serial_stop_tx_dma()` 在 `!qcom_geni_serial_main_active()`（空闲）时**立刻返回** ✓
+⇒ 127 ms 只在**挂起瞬间有在飞的 TX 命令**时出现 ✓，
+也就是**蓝牙栈正在写 UART**（例如 bluetoothd 正在做固件下载/重试）的时候 ✓
+—— 与 2.4.19 的"写竞态"假设一致 ✓，而且给出了更具体的复现条件 ✓：
+**挂起时要有活跃的 BT 写入** ✓。（另记：每设备耗时需要
+`initcall_debug` **和** `pm_print_times` 同时开 ✓，`initcall_debug_report()` 只看后者 ✓。）
+
+**C. 有效的新观测点：`suspend_prepare()` 那段窗口 ✓**
+
+对比同一批日志里 `PM: suspend entry (s2idle)` 到 `Freezing user space processes` 的间隔 ✓：
+
+| 适配器状态 | 间隔 |
+|---|---|
+| **已上电**（boot -2/-3）| **6 s**（12:58:37→12:58:43、12:59:15→12:59:21、13:00:03→13:00:09）|
+| 未上电（当前 boot）| **0.42 s** |
+
+这段窗口就是 `suspend_prepare()` ✓：`pm_prepare_console()` + **`PM_SUSPEND_PREPARE`
+通知链** ✓（`kernel/power/suspend.c:358`）。而 `hci_suspend_notifier()` →
+`hci_suspend_dev()` → `hci_suspend_sync()` 正是那条链上的重活 ✓
+（`hci_serdev` 只为 `hci_h5` 设 `HCI_QUIRK_NO_SUSPEND_NOTIFIER` ✗ ⇒ **QCA 的通知器是注册的** ✓，
+见 `hci_serdev.c:360`）。`HCI_CMD_TIMEOUT` = 2 s ✓ ⇒ **3 条超时命令 ≈ 6 s** ✓
+—— 说明"适配器上电"时，挂起的头 6 秒花在 **BT 栈的命令序列**上，而不是设备挂起 ✓。
+
+**D. 纠正 2.4.15/2.4.19 的一条推理 ✗**：挂死 boot 的 journal 都停在
+`PM: suspend entry (s2idle)`、没有 `Freezing …` 行 ✗ —— 这**不能**用来说明挂死点在
+freeze **之前** ✓，因为 journald 是用户态 ✓，被冻住后就不再读 `/dev/kmsg` ✓；
+而**成功**的轮次里那些 `Freezing …`/`suspend of devices …` 行之所以在，
+是**解冻后** journald 重新读 `/dev/kmsg` 补记的 ✓ ⇒ 挂死轮自然会缺 ✓。
+（`pstore` 不可用 ✓ 的老结论仍成立 ✗ —— 所以卡死点确实取不到 ✓。）
+
+**E. 顺带看到的两处噪音（与本条无关 ✓）**
+- `qcom-iris aa00000.video-codec: skip VPU power collapse (-16)` 每 **2 s** 一次、持续不断 ✗
+  —— 是 `iris_pc_handler()` 的 2 s 闲置重试 ✓（`IRIS_PC_DELAY_MS`，`hfi_common.c:263`），
+  有界、只是日志噪音 ✓。
+- 一次挂起尝试后相机起不来 ✗：`qcom-camss: CSID/VFE reset timeout`、
+  `Failed to power up pipeline: -5` ✓（与 2.4.16 的 camcc PLL 是同一片区域 ✓）。
+
+**F. 修正后的下一步（先二分，再谈修法 ✓）**
+
+既然"挂死在设备挂起阶段"从未被直接验证 ✗，先用 **`pm_test` 阶段二分** ✓（不用改内核 ✓）：
+
+| 变体（工具已实现 ✓）| 跑到哪 | 若挂死 ⇒ 结论 |
+|---|---|---|
+| `freezer-bt` | `suspend_prepare()` + 冻结，**不挂任何设备** ✓ | 挂死点**不在**设备挂起 ⇒ 回到 BT 通知器/`hci_suspend_dev` ✓ |
+| `devices-bt` | 再加设备挂起 ✓ | 只有它挂 ⇒ 2.4.17 的"设备挂起阶段"成立 ✓ |
+
+关键优势 ✓：`hci_suspend_dev` 在 **freeze 之前**跑 ✓ ⇒ 它打的 debug 会**留在 journal 里** ✓
+（那时 journald 还活着 ✓）⇒ 给 BT 栈开 **dynamic debug**（实机可用 ✓，
+`/sys/kernel/debug/dynamic_debug/control` 有 6364 条 ✓）后，挂死 boot 的
+`journalctl -k -b -1` 就能指出卡在哪一步 ✓。工具已自动打开
+`initcall_debug` + `pm_print_times` + `pm_debug_messages` + BT 五个文件的 dyn-debug ✓。
+
+前提 ✗：**必须在一台 `QCA setup on UART is completed` 的 boot 上跑** ✓（否则只会看到
+3 s 中止 ✗，永远复现不出挂死 ✓）—— 工具会在固件没下来时直接拒绝运行 `*-bt` 变体 ✓。
 
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
