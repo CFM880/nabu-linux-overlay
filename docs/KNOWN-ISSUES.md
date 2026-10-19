@@ -1214,7 +1214,7 @@ freeze **之前** ✓，因为 journald 是用户态 ✓，被冻住后就不再
 前提 ✗：**必须在一台 `QCA setup on UART is completed` 的 boot 上跑** ✓（否则只会看到
 3 s 中止 ✗，永远复现不出挂死 ✓）—— 工具会在固件没下来时直接拒绝运行 `*-bt` 变体 ✓。
 
-#### 2.4.21 2026-10-19：`pm_test` 阶段二分完成 —— **只有真挂起才复现**，挂死在 freeze 之后、看门狗自动重启
+#### 2.4.21 2026-10-19：`pm_test` 阶段二分完成 —— **只有真挂起才复现**；挂死期间机器不再响应（唤醒也失效）
 
 今天在实机（`6.14.11-nabu-full`，192.168.0.67，`~/nabu-suspend-ab.sh` +
 `~/nabu-suspend-stackwatch.sh`）把 2.4.15/2.4.17 的复现前提彻底验了一遍 ✓。
@@ -1236,15 +1236,25 @@ freeze **之前** ✓，因为 journald 是用户态 ✓，被冻住后就不再
 NM `PrepareForSleep` 断 WiFi → 内核）+ **BT 适配器已上电** + 后台 `bluetoothctl scan on`；
 每次约 10–30% ✓。
 
-**2) 挂死在 freeze **之后** ✓（这次有硬证据 ✓）**
+**2) 挂死期间机器整体不再响应 ✓（而且**不会**自己重启 ✗ —— 初稿误判，已更正 ✓）**
 
-`/dev/watchdog0`（`qcom_wdt`）由 systemd 运行时看门狗在踢 ✓；挂死后 **PID 1 再也踢不了** ✓
-⇒ 看门狗 **~30 s 后自动复位整机** ✓ ⇒ **当时用户态是冻结的** ✓（freeze 已发生 ✓）。所以：
-- journal 停在 `PM: suspend entry (s2idle)` + 一串 `hci0 Event packet` ✗（journald 被冻 ✓）；
-- **用户态任何工具都救不了** ✗（`nabu-suspend-stackwatch.sh` 也被冻住 ✓，
-  且 60 s 阈值慢于看门狗 ✓）—— 2.4.15 的"无任何活通道"✗ 至此有了机制解释 ✓；
-- **好消息 ✓**：**不用长按了** ✓ —— 每次挂死约 30–60 s 后平板自己重启回来 ✓
-  （A/B 成本从"人工长按"降到"等一分钟"✓）。
+**更正（2026-10-19 晚）**：2.4.21 初稿写"`qcom_wdt` 约 30 s 自动重启、不用长按" ✗ —— **错的**：
+实机 `RuntimeWatchdogUSec=0`、运行时**没有** `/dev/watchdog` 持有者、
+`/sys/class/watchdog/watchdog0/` 甚至不存在（只有 systemd 在关机时短暂打开 ✓）
+⇒ **挂死后不会自动恢复 ✗，仍然只能长按电源 ✓**（那两次"自己回来了"其实都是长按 ✓）。
+
+挂死的**可靠特征** ✓（可为 A/B 判据 ✓）：
+- journal/内核日志**只有 `PM: suspend entry (s2idle)`、没有 `PM: suspend exit`** ✓
+  （整条 sleep→resume 链路一次都没走完 ✓，与"唤醒失效"一致 ✓）；
+- 用户态心跳（`nabu-suspend-stackwatch.sh` 的 `beat.log`，只依赖 `dmesg`+`sleep` ✓）
+  **在挂死那一刻停住** ✗ ⇒ 用户态（或整个 SoC）已不再推进 ✓；
+- **按电源键唤不醒** ✓（连 IRQ 都不再被处理 ⇒ 更像"卡在一次访问/持锁"而非普通死锁 ✓）。
+
+**零交互复现 ✓（最有价值的一条）**：2026-10-19 16:06 那次**根本没人操作** ——
+GNOME 闲置 → 真 s2idle（`wlan0 … DEAUTH_LEAVING` ⇒ NM `PrepareForSleep` → `PM: suspend entry`）
+⇒ **再也没有 `suspend exit`** ✗ ⇒ 按电源键无效 ⇒ 长按重启（16:21 新 boot ✓）。
+⇒ 这就是用户报的"按电源键休眠 → 按电源键唤不醒" ✓✓，且说明机器是在
+**睡眠/唤醒这段里就死了**（不是设备挂起回调里 ✓）。
 
 **3) 排除"蓝牙作为唤醒源"✗**
 
@@ -1270,13 +1280,48 @@ NM `PrepareForSleep` 断 WiFi → 内核）+ **BT 适配器已上电** + 后台 
    `PM: calling/resume of device …` 就是答案 ✓（不用打补丁 ✓）；
 3. 需要更细时临时 `pr_emerg()` 到 geni 的 `shutdown`/`startup`/ISR ✓。
 
-**备用（不用硬件 ✓）**：既然挂死会自己重启 ✓、复现率 10–30% ✓，
-可直接对候选修复做统计 A/B ✓（每变体 15–20 次真挂起比挂死率 ✓）：
-`bluetooth.service` mask（已知 0% ✓，对照 ✓）、geni `if (uport->suspended) return;` 守卫 ✓、
-`hci_qca` 睡前静默（取消全部 work + IBS 保护）✓。
+**备用（不用硬件 ✓）**：挂死仍需长按 ✗，所以 A/B 要短（每变体 5–8 次真挂起 ✓，
+人要在旁边 ✓）：`bluetooth.service` mask（已知 0% ✓，对照 ✓）、
+geni `if (uport->suspended) return;` 守卫 ✓、
+`hci_qca` 睡前静默（取消全部 work + 停 IBS 定时器 + `HCI_UART_SUSPENDING` 门 ✓，
+补丁见 2.4.22 ✓）。
 
 **工具已改 ✓**：stackwatch 的 stall 降到 20 s ✓（要快过看门狗 ✓，但只对 freeze 前的挂死有效 ✓）；
 `nabu-suspend-ab.sh` 新增 `real-bt|real-nobt` 与 `NABU_SUSPEND_AB_PMTEST=<阶段>` ✓。
+
+#### 2.4.22 2026-10-19：机制闭环 —— 挂起窗口里 BT 栈仍会写 UART（补丁已编译验证，待实机 A/B）
+
+**为什么 `pm_test` 复现不了、真挂起却挂** ✓：freeze **不冻结定时器** ✓，而
+`system_wq` 与 `qca_wq` **都不是 `WQ_FREEZABLE`**（`alloc_workqueue("events", 0, 0)`、
+`alloc_ordered_workqueue("qca_wq", 0)` ✓）⇒ 整个睡眠期里：
+`hci_ibs_tx_idle_timeout()`（定时器 ✓）→ `queue_work(ws_tx_vote_off)` →
+`qca_wq_serial_tx_clock_vote_off()` → `hci_uart_tx_wakeup()` → `write_work`(system_wq) →
+`serdev_device_write_buf()` → geni 寄存器 ✓，**而此时 `qcom_geni_serial_shutdown()` 已把
+SE 时钟 / OPP / ICC 关掉 ✗** ⇒ 访问停住 ⇒ 整机不再响应（含电源键唤醒 ✓）。
+`pm_test` 里这个窗口只有 ~0.3 s（BT 栈还是冻的 ✓）⇒ 40 轮不挂 ✗；真挂起是整段睡眠 ⇒ 10–30% ✓。
+
+**候选修复 A（`/tmp/opencode/fix-A-hci-quiesce.patch` ✓，已用
+`nabu-main/out/.config` + `aarch64-linux-gnu-gcc` 单目录编译验证 ✓，树已还原 ✓）**：
+1. `hci_uart.h`：新增 `HCI_UART_SUSPENDING`（proto flag bit 5 ✓）；
+2. `hci_ldisc.c`：`hci_uart_tx_wakeup()` 在 `HCI_UART_SUSPENDING` 时 `goto no_schedule`
+   ✓（一个点挡住所有发送方 ✓：IBS 定时器 / 重传定时器 / HCI 命令队列 ✓）；
+3. `hci_qca.c`：`qca_suspend()` 里 `set_bit(HCI_UART_SUSPENDING)` 后再
+   `cancel_work_sync(ws_tx_vote_off/ws_rx_vote_off)` + `timer_delete_sync(tx_idle_timer)`
+   ✓；`error:` 与 `qca_resume()` 里 clear ✓。
+
+**候选修复 B（次要 ✓）**：`qcom_geni_serial_start_tx_dma()/start_tx_fifo()` 开头
+`if (uport->suspended) return;` ✓（与 ISR 里既有的检查对齐 ✓，防止任何迟到的写落到寄存器 ✓）。
+
+**落点**：现在**没有模块拥有 `drivers/bluetooth`** ✗ ⇒ 用 A 的话，正式落地是把
+`kernel-overlay/drivers/bluetooth/{hci_ldisc.c,hci_qca.c,hci_uart.h}` 挂到
+**`nabu-platform`** ✓（它已管 uart13 的 DTS 与 `c8c000.serial` 的 wakeup udev 规则 ✓）。
+
+**测法** ✓：`tools/nabu-suspend-ab-loop.sh <轮数> <标签>`（host 侧 ✓）—— 每轮一次真挂起，
+**用 `boot_id` 判定**（挂死 ⇒ 长按重启 ⇒ boot_id 变 ✓；正常 ⇒ 不变 ✓，不受 NM 那 2 分钟
+WiFi 恢复影响 ✓）；顺带开 `scan on` 流量、关掉桌面闲置休眠 ✓。
+
+**当前缓解 ✓（2026-10-19 16:2x 已在实机执行 ✓）**：`systemctl mask bluetooth.service` ✓
+（镜像本来就该 mask ✓，实机上却是 `enabled` ✗ —— 见 2.4.17 的 `customize.sh` 条目 ✓）。
 
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），

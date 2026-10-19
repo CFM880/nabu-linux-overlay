@@ -4,19 +4,20 @@
 # nabu-suspend-ab-loop.sh - run real s2idle cycles against a nabu tablet over
 # SSH and count how many of them wedge.
 #
-# Since 2.4.21 a wedged suspend is no longer a manual long press: systemd kicks
-# /dev/watchdog0, a frozen machine stops kicking it, and qcom_wdt resets the
-# tablet about 30 s later.  So the outcome of a round can be decided without any
-# console:
+# A wedged suspend does *not* recover by itself (2.4.21: RuntimeWatchdogUSec=0
+# and nothing holds /dev/watchdog), so it still needs a manual long press.  What
+# the loop can do is decide the outcome of every round without a console:
 #
-#   - the tablet is rebooted by the watchdog, so /proc/sys/kernel/random/boot_id
-#     changes.  Same boot_id after a round => the suspend returned normally;
-#     different => that round wedged.
+#   - the tablet is only reachable again if it either resumed (same
+#     /proc/sys/kernel/random/boot_id) or was reset and rebooted (different
+#     boot_id).  Same boot_id => the suspend returned normally; different or
+#     never coming back => that round wedged.
 #
-# That makes candidate fixes testable statistically: each round is ~1.5 min
-# (suspend + wake + WiFi coming back), a wedge adds ~1 min for the reset and
-# boot.  Only valid for the "real suspend" configuration - pm_test variants never
-# reproduced the wedge (2.4.21).
+# That makes candidate fixes testable statistically, at ~1.5 min per round
+# (suspend + wake + WiFi coming back) plus a manual reset whenever a round
+# wedges - so keep the runs short and stay near the tablet.  Only valid for the
+# "real suspend" configuration: pm_test variants never reproduced the wedge
+# (2.4.21).
 #
 # Usage:
 #   nabu-suspend-ab-loop.sh [rounds] [label]
@@ -27,7 +28,8 @@
 #   NABU_WAKE     RTC wake alarm, seconds    (default 25)
 #   NABU_TRAFFIC  1 = keep a BT scan running (default 1)
 #   NABU_OUT      log file                   (default /tmp/nabu-ab-<label>.log)
-#   NABU_UP_WAIT  max seconds to wait for WiFi to come back (default 240)
+#   NABU_UP_WAIT  max seconds to wait for WiFi to come back (default 900; a
+#                 wedge never comes back, so keep someone next to the tablet)
 #   NABU_DOWN_WAIT max seconds to wait for the tablet to leave the network
 #                 after requesting a suspend (default 60)
 
@@ -40,7 +42,7 @@ HOST=${NABU_HOST:-cfm880@192.168.0.67}
 WAKE=${NABU_WAKE:-25}
 TRAFFIC=${NABU_TRAFFIC:-1}
 OUT=${NABU_OUT:-/tmp/nabu-ab-$label-$(date +%Y%m%d-%H%M%S).log}
-UP_WAIT=${NABU_UP_WAIT:-240}
+UP_WAIT=${NABU_UP_WAIT:-900}
 DOWN_WAIT=${NABU_DOWN_WAIT:-60}
 
 SSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8 $HOST"
