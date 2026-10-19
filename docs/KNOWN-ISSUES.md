@@ -993,6 +993,133 @@ MediaDevice: Failed to setup link 'msm_csid0'[1] -> 'msm_vfe0_rdi0'[0]: timed ou
 
 **其余所有条目均已修复** ✓ —— 唯一仍开放的就是这一条 ✗（有稳定的规避 ✓）。
 
+#### 2.4.19 2026-10-19：蓝牙 UART 挂起的代码级复核 + A/B 工具（根因假设，待实机验证）
+
+承接 2.4.17/2.4.18（`c8c000.serial` 的系统挂起偶尔永不返回 ✗）。本轮**不动内核**，
+只把代码读透、给出可判别的假设和工具。
+
+**前提更正（重要 ✓）**：`hci_uart` 的**公共层**确实没有 PM 回调 ✗ ——
+`drivers/bluetooth/hci_serdev.c` 里没有任何 `pm_ops/_suspend/_resume` ✓；但 nabu 用的是
+`qcom,wcn3991-bt` ⇒ `hci_qca` ✓，它**已经有** serdev PM：`SIMPLE_DEV_PM_OPS(qca_pm_ops,
+qca_suspend, qca_resume)` 挂在 `qca_serdev_driver.driver.pm` 上 ✓，而 `qca_suspend()`
+也已经做了 `serdev_device_write_flush()` + `serdev_device_wait_until_sent()` + 等 IBS
+`SLEEP_IND` ✓（全部有界超时 ✓）。⇒「补一个 hci_uart suspend 回调」不是缺的那块 ✗。
+
+**固件**：本轮实测跑的是 **`6.14.11-nabu-full`** ✓（`main` 分支 product）⇒ 下面的代码引用都是
+`linux-6.14/` ✓（7.2 的 geni 驱动差异很大 ✗：它把资源开关挪到 **runtime PM**
+（`10904d725f6e serial: qcom-geni: Enable PM runtime`），`ops->pm` 走
+`pm_runtime_put_sync`；6.14 是**直接** `geni_se_resources_off()` ✓）。
+
+**1) 127 ms 的来源（6.14 ✓）**
+
+`qcom_geni_serial_suspend()` → `uart_suspend_port()`（`drivers/tty/serial/serial_core.c`）：
+端口被 BT 打开（`tty_port_initialized` ✓）⇒ 走完整路径 ✓：
+`ops->stop_tx()` = `qcom_geni_serial_stop_tx_dma()` → `geni_se_cancel_m_cmd()` +
+`qcom_geni_serial_poll_bit(M_CMD_CANCEL_EN)` ✗ 失败 → `geni_se_abort_m_cmd()` +
+poll `M_CMD_ABORT_EN` ✗ → 3×`msleep(10)` 排水 → `ops->shutdown()` =
+`qcom_geni_serial_shutdown()`（`disable_irq` + 再来一遍 stop_tx/stop_rx/cancel_tx_cmd）。
+
+每个 poll 的上限就是 `port->poll_timeout_us` ✓（`qcom_geni_serial_set_termios()` 里
+`jiffies_to_usecs(uart_fifo_timeout())` + 3/FIFO 深度 ✓）；3.2 Mbaud / 32 B FIFO ≈ 20 ms 一次 ✓，
+几次相加 ≈ **127 ms** ✓ ⇒ **这个数是"cancel/abort 超时被打满"** ✗，不是正常排水 ✓。
+即挂起时 SE 的 TX DMA 本来就没能在超时内停下 ✓。
+
+**2) 关键结构性问题：SE 资源关掉之后，端口仍然是 open ✓**
+
+`uart_suspend_port()` 最后一行是 `uart_change_pm(state, UART_PM_STATE_OFF)` ✓
+（`serial_core.c:2434`）⇒ 6.14 的 `.pm = qcom_geni_serial_pm` ✓
+（`qcom_geni_serial.c:1617/1634`）⇒
+
+```
+geni_se_resources_off(&port->se);   /* clk_disable_unprepare(se->clk)+wrapper clks,
+                                       pinctrl_pm_select_sleep_state */
+dev_pm_opp_set_rate(uport->dev, 0);
+geni_icc_disable(&port->se);        /* NoC 通路也关 */
+```
+
+而**端口并没有被 close** ✗：`state->port.xmit_buf` 还在 ✓，`port->state->port.tty` 还在 ✓，
+`uart_write()`/`__uart_start()` 里**没有任何 `uport->suspended` 检查** ✗，geni 侧
+`qcom_geni_serial_start_tx_dma()` / `set_termios()` 也**没有** ✗（只有 ISR 有
+`if (uport->suspended) return IRQ_NONE;` ✓）。⇒ 挂起窗口内任何一次 UART 写都会
+`readl(SE_GENI_STATUS)` **在 SE 时钟/ICC 已关的情况下访问寄存器** ✗。
+
+**3) 谁会在那个窗口里写 UART？——BT 栈 ✓**
+
+- `qca_suspend()` 只 `cancel_work_sync()` 了 `ws_awake_device` 和 `ws_awake_rx` ✗，
+  **没有取消** `ws_tx_vote_off` / `ws_rx_vote_off` ✗（`hci_qca.c`）。
+- `hci_ibs_tx_idle_timeout()`（定时器，**挂起时照样会 fire** ✗）**不检查
+  `QCA_SUSPENDING`** ✗ ⇒ 会 `queue_work(ws_tx_vote_off)` ⇒
+  `qca_wq_serial_tx_clock_vote_off()` 最后是 `hci_uart_tx_wakeup(hu)` ✗
+  ⇒ `serdev_device_write_buf()` ⇒ tty 写。
+- 这些 workqueue（`hu->write_work` 在 `system_wq` ✓、qca 自己的
+  `alloc_ordered_workqueue()` ✓）**都不是 `WQ_FREEZABLE`** ✗ ⇒ 设备挂起阶段仍然会跑 ✓
+  （`system_freezable_wq` 才是会被冻的那个 ✓）。
+- 对比：`qca_ibs_wake()`/`hci_ibs_wake_retrans_timeout()` 都检查了 `QCA_SUSPENDING` ✓
+  —— 说明作者知道要挡，**但 IBS tx 空闲那条路漏了** ✗。
+
+**⇒ 根因假设 ✓（可判别）**：`qca_suspend()` 返回后、geni 把 SE 资源关掉之后，
+BT 栈仍有一个在飞/待跑的 UART 写落到寄存器上 ⇒ interconnect 访问停住 ⇒
+**整机在设备挂起阶段永久卡死且无输出** ✗。
+
+它一次解释全部现象 ✓：必须 bluetoothd 持住 HCI ✓（IBS 定时器/work 才有）、约 50% ✓（竞态）、
+`disable_irq_nosync` 无关 ✓（2.4.18）、解绑 UART / 禁蓝牙都好 ✓、成功轮 127 ms ✓、
+卡死轮无输出 ✓（console 是 dwc3 上的 ttyGS0，比 `c8c000.serial` 先挂起 ✗）。
+
+**4) 观测通道（唯一可行的 ✓）**
+
+`console=ttyGS0`（USB gadget）在 dpm 里跟 dwc3 一起没了 ✗，`pstore/ramoops` 又因 DDR 被清而无效 ✗
+⇒ printk 拿不到卡死那轮 ✗。**`a90000.serial` 才是那条不会随挂起消失的 UART** ✓：
+它是 `qcom,geni-debug-uart`（`serial0` ⇒ **`/dev/ttyMSM0`** ✓）。把它**当成 console**
+（cmdline 加 `console=ttyMSM0,115200`）之后 ✓，geni console 端口在
+`uart_suspend_port()` 里因为 `console_suspend_enabled=0`（`no_console_suspend` ✓）
+会在 `uport->suspended = 1` 之前 **early-return** ✓ ⇒ 它的资源**不会被关** ✓
+⇒ 挂起过程中一直能出字 ✓。做法：cmdline 加
+`console=tty0 console=ttyMSM0,115200 no_console_suspend` ✓
+（`serial-debug` 那份已经带 `no_console_suspend pm_debug_messages` ✓），板上接 UART 适配器 ✓。
+代价是这个口在挂起期间一直供电 ✓（调试期可接受 ✓）。
+`c8c000.serial` 是 `hsuart0` ⇒ **`/dev/ttyHS0`** ✓。
+
+**5) A/B 工具（本轮交付）**
+
+`tools/nabu-suspend-ab.sh <variant> [rounds]` ✓ —— 每个变体跑 N 轮 `pm_test=devices` ✓，
+每轮前后往 `/dev/kmsg` 打标记 ✓，结束时汇总内核日志里的
+`Unable to drain transmitter` / `M_CMD_ABORT_EN not set` / `TX DMA reset failed` /
+`Failed to send SLEEP` / 各设备挂起耗时 ✓。挂死那轮脚本检测不到 ✗（整机没了 ✓）：
+长按重启后**再跑同一个变体**，数通过了多少轮 ✓。
+
+| 变体 | 环境 | 假设的预测 |
+|---|---|---|
+| `baseline` | 蓝牙正常运行 | 约 50% 挂死 ✗ |
+| `bt-masked` | stop + mask（2.4.17 稳定配置） | 全过 ✓ |
+| `bt-stop` | 仅 stop | 全过 ✓（无 IBS 流量） |
+| `bt-stop-open` | stop + 用户态持住 `/dev/ttyHS0` | **全过** ⇒ 光"端口 open"不够 ✓（假设成立） |
+| `qca-unbind-open` | 解绑 `hci_uart_qca` + 持住 tty | 全过 ✓ ⇒ 必须要有 qca 代码参与 ✓ |
+| `bt-nocrtscts` | 蓝牙运行但 tty `-crtscts` | 若**全过** ⇒ 触发条件是 CTS 卡住的 SE TX DMA ✗（则改走 geni 侧） |
+
+**6) 下一步（决定性一步，最便宜 ✓）**
+
+一行临时守卫：`qcom_geni_serial_start_tx_dma()`（以及 `set_termios()`）开头
+`if (uport->suspended) return;` ✓ —— 与 ISR 里既有的 `uport->suspended` 检查对齐 ✓。
+若 20 轮 `baseline` 全过 ⇒ **假设成立** ✓，于是正式修在 BT 侧（`hci_qca`：
+把 `ws_tx_vote_off`/`ws_rx_vote_off` 一并 `cancel_work_sync`；给
+`hci_ibs_tx_idle_timeout` 等所有会发包的定时器/work 加 `QCA_SUSPENDING` 保护；
+`hci_serdev` 加挂起钩子，挂起期间让 `hci_uart_tx_wakeup()` 直接返回 ✓）。
+若仍挂 ⇒ 假设不成立 ✗，挂死在 geni 自身路径里，回到 `pm_print_times` + `ttyMSM0` 观测 ✓。
+
+**落点待定**：现在**没有任何模块**拥有 `drivers/tty/serial` 或 `drivers/bluetooth`
+（`nabu-serial` 明确无 overlay ✗）⇒ 定下正式修法后，要么扩展 `nabu-platform` 的
+`kernel-overlay/`（它已经管 `sm8150.dtsi` 的 uart13 与 `c8c000.serial` 的 wakeup 规则 ✓），
+要么新开一个模块 ✓。
+
+**顺便记下（7.2 才有，6.14 不涉及）**：`e3c04834ae1a serial: qcom-geni: fix TX DMA buffer
+flush` ✓（"挂起时若正在 TX DMA 去 flush ⇒ UART 卡死反复发坏帧，随后 `tcdrain` 永久挂" ✓，
+正是我们这片代码 ✗）与 `59faa59c25a0 do not advance stale DMA completions` ✓；
+另外 `serial: qcom-geni: add force suspend/resume to system sleep callbacks`
+（Praveen Talari，2026-07）**不在** 7.2.7 里 ✗，它说"端口被 open 持住时系统挂起不会触发
+runtime-suspend" ✓ —— 与 2.4.19 同源的问题面，将来升 7.2 时要一起复核 ✓。
+
+**规避不变 ✓**：镜像里仍然 **mask `bluetooth.service`** ✓（26 轮 + 2 次真实挂起全过 ✓）。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
