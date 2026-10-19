@@ -1348,6 +1348,38 @@ WiFi 恢复影响 ✓）；顺带开 `scan on` 流量、关掉桌面闲置休眠
 
 **观测现状（重要 ✗）**：平板**没有物理调试 UART**（只有 Type-C ✓，CP2102 是给 ESP32 用的 ✗）⇒ gadget console 随 dwc3 一起挂 ✗ ⇒ 崩溃瞬间**没有可用通道** ✗；而 freeze 之后 UFS 也挂了 ✗、`pstore` 又被清 ✗ ⇒ 目前只能靠**统计 A/B** ✓，不能抓栈 ✓。
 
+#### 2.4.24 2026-10-19：Type-C 口卡在 host/source 角色 ⇒ USB gadget console（唯一的串口）出不来
+
+现象：平板上 `nabu-usb-console.service` 是 active ✓、`printk: legacy console [ttyGS0] enabled` ✓、
+`dwc3`/`typec` 都探测正常 ✓，但**主机侧看不到任何 USB 设备** ✗（`lsusb` 没有 Xiaomi/QCOM gadget ✗）。
+
+实机取证 ✓：
+
+```
+cat /sys/class/udc/a600000.usb/state   → not attached     ✗（gadget 永远 enumerate 不了）
+cat /sys/class/typec/port0/data_role   → host [device]    ✗（当前是「主机」角色）
+cat /sys/class/typec/port0/power_role  → source [sink]    ✗（当前是「供电方」）
+ls  /sys/class/typec/port0-partner/    → （空）           ✗（没识别到对端）
+```
+
+尝试强制回 device 角色都失败 ✗：
+- `echo device > /sys/class/typec/port0/data_role` → **EAGAIN**（tcpm 拒绝 ✗）
+- `echo sink   > /sys/class/typec/port0/power_role` → **EIO** ✗
+- `/sys/class/usb_role/a600000.usb-role-switch/` 里**没有 `role` 属性** ✗（只有 `power/`、`subsystem`、`uevent` ✓）
+⇒ 角色由 **tcpm/PD 状态机**独占 ✓，它 latch 在 host/source ✗ ⇒ sysfs 改不动 ✓。
+
+**影响 ✓**：这是目前唯一可用的"串口"（USB gadget console = `console=ttyGS0` ✓）✗ ⇒ 它出不来时，
+崩溃/唤醒都**无串口可读** ✗（而平板没有独立调试 UART ✓，见 2.4.23 ✓）。
+
+**观察到的规避 ✓**：同一天早些时候（13:5x–18:xx）这条 console 是**可用**的 ✓（cmdline 一直是 `console=ttyGS0` ✓）
+⇒ 口本身能在 device 角色工作 ✓，只是**当前这次 latch 成了 host** ✗。下次要串口时：
+**先把 Type-C 数据线插好、再冷启动平板** ✓（让 tcpm 在 boot 时就带着对端做角色判定 ✓）；
+插拔后 `cat /sys/class/typec/port0/data_role` 应该变成 `device` ✓、`cat /sys/class/udc/a600000.usb/state` 变成 `configured` ✓。
+
+**待查（真 bug ✓）**：为什么 tcpm 会把对端识别成需要 host/source 角色 ✗
+（`serial-debug` 黑名单只去掉了 `ln8000_charger` ✓；`pmic-typec`（`c440000.spmi:pmic@2:typec@1500` ✓）
+与 `i2c@890000/typec-mux@43` ✓ 仍在管事 ✗）—— 记下待办 ✓。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
