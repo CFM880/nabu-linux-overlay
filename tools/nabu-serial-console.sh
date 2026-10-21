@@ -27,9 +27,11 @@ while :; do
 	if [ "$was_up" = no ]; then
 		print_t "[capture: $PORT open @115200]"; was_up=yes
 	fi
-	while IFS= read -r line; do
+	# Bounded reads: after a host reboot the old fd stays "open" but never
+	# returns data, so a plain `while read` would sit there forever.
+	while IFS= read -r -t 5 line; do
 		printf '%s %s\n' "$(date +%H:%M:%S)" "$line"
 	done < "$PORT" >> "$LOG" 2>/dev/null
-	print_t "[capture: read returned, reopening]"
+	print_t "[capture: read timed out or EOF, reopening]"
 	sleep 1
 done

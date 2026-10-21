@@ -1,1 +1,1 @@
-savedcmd_Module.symvers :=  /home/cfm880/sources/nabu-linux/nabu-main/out/scripts/mod/modpost -M          -o Module.symvers -T modules.order -i /home/cfm880/sources/nabu-linux/nabu-main/out/Module.symvers -e 
+savedcmd_Module.symvers :=  /home/cfm880/sources/nabu-linux/nabu-main/out/scripts/mod/modpost -M      -w    -o Module.symvers -T modules.order -i /home/cfm880/sources/nabu-linux/nabu-main/out/Module.symvers -e 

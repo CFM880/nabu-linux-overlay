@@ -1409,6 +1409,47 @@ resume 时 IC 状态读回全 0 ✗、reset-state 检查失败 ✗ ⇒ 控制器
   所有崩溃/唤醒取证的首选通道 ✓；但它在 dwc3 挂起时会消失 ✗（挂死瞬间仍看不到 ✗）。
 - 主机与平板换到 `192.168.1.0/24` ✓（平板 `192.168.1.5` ✓、构建机 `192.168.1.13` ✓）。
 
+#### 2.4.26 2026-10-21：真正的挂死链 —— 挂起中途的 VT unblank 触发 mdss 重使能 + `disp_cc_pll0` 锁不上
+
+串口 console（`cat /dev/ttyACM0 >> log` ✓，`loglevel=4` ✓）终于抓到完整现场 ✓：
+
+```
+PM: suspend entry (s2idle)
+disp_cc_pll0 failed to enable!
+  wait_for_pll ← clk_trion_pll_enable ← clk_bulk_prepare ← mdss_runtime_resume
+  ← genpd_runtime_resume ← rpm_resume ← dpu_kms_enable_commit ← msm_atomic_commit_tail
+  ← drm_fb_helper_set_par ← fbcon_blank ← do_unblank_screen ← vt_ioctl     ★
+  （userspace = systemd-logind 的 VT ioctl ✗）
+Failed to prepare clk 'core': -110 → msm-mdss clock enable failed → msm_dsi_phy_enable -16
+→ panel init -22 → dpu irq timeout → 然后 Freezing → panel set display off -22
+→ WARNING: unbalanced disables for ldo5（msm_dsi_phy_disable ✗）→ 整机挂死
+```
+
+⇒ **挂起入口时 logind 通过 VT ioctl 做了一次 unblank** ✗ ⇒ 触发完整 DRM modeset ✗ ⇒
+`mdss_runtime_resume` 要求重新锁定 `disp_cc_pll0` ✗ ⇒ **PLL 锁不上（-110）** ✗ ⇒
+显示/DSI/面板拆解全部失败 ✗ ⇒ `ldo5` 关闭不平衡 ✗ ⇒ 挂死 ✓。
+
+**已做的尝试与结果 ✓**
+
+| 改动 | 结果 |
+|---|---|
+| 去掉 `no_console_suspend`（让 console 先挂起）✗ | **仍然挂** ✗ —— 不是唯一触发者 ✓ |
+| `msm_mdss` 对 **`core` 时钟持永久引用**（2.4.11 那条，之前丢失 ✗，已补回 ✓）| **唤醒成功** ✓：短按后机器恢复、`wlan0` 重新关联 ✓✓ |
+
+⇒ 现在**电源键唤醒通了** ✓，只剩**屏幕不亮** ✗：查出来是
+`/sys/class/backlight/ktz8866-backlight/bl_power = 4`（`FB_BLANK_POWERDOWN` ✗）——
+**面板在（`card0-DSI-1 = connected` ✓）、背光被关掉** ✗ ⇒ 下次修 `nabu-display`：
+resume 时把背光 `bl_power` 恢复成 0 ✓（或让 ktz8866 驱动在 resume 里恢复 ✓）。
+
+**工具与流程（已固化 ✓，见 `tools/README.md`）**：`nabu-install-uki.sh`（ESP 不能 mount ✗、
+mtools 直连报 hidden-sector ✗ ⇒ `dd` 出来 → `mcopy` → `dd` 回去 ✓；UKI 在
+`EFI/debian/nabu-debian.efi` ✗ 不是根 `debian/` ✗）、`nabu-serial-console.sh`（宿主端常驻抓取 ✓）、
+`nabu-suspend-ab-loop.sh`、`nabu-suspend-stackwatch.sh`、`wake-diag/` ✓。
+
+**观测结论（硬约束 ✓）**：freeze 之后文件系统与磁盘都挂起 ✗、`pstore` 不保 ✗、唯一 console 是
+USB gadget（随 dwc3 消失 ✗）⇒ **挂死点只能靠串口在挂起前/恢复后抓** ✗；崩溃 trace 建议
+`loglevel=4`（`ignore_loglevel` 会把 gadget 缓冲冲爆 ✗ ⇒ `[missed … bytes]` ✗）。
+
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），
   系统**整机卡死** —— 之后按电源键无反应，连 RTC 闹钟也唤不回来，只能长按电源强重启。
