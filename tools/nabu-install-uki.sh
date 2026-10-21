@@ -28,8 +28,12 @@
 
 set -u
 
+# The default UKI is a sibling repo (nabu-main), so resolve it relative to this
+# script instead of the caller's working directory.
+TOOLS_DIR=$(cd "$(dirname "$0")" && pwd)
+
 HOST=192.168.0.67
-UKI=nabu-main/artifacts/serial-debug/nabu-serial-debug.efi
+UKI=$TOOLS_DIR/../../nabu-main/artifacts/serial-debug/nabu-serial-debug.efi
 DEST=EFI/debian/nabu-debian.efi
 PART=/dev/disk/by-partlabel/esp
 REBOOT=1
@@ -48,7 +52,20 @@ while getopts "H:u:d:p:nR" opt; do
 done
 
 [ -f "$UKI" ] || { echo "no such UKI: $UKI" >&2; exit 1; }
-: "${NABU_PW:=$(read -rsp "sudo password for $HOST: " p && echo "$p")}"
+
+# Fail before touching the tablet: without NABU_PW and without a terminal the
+# old code sent an empty password and sudo burned three attempts ("3 incorrect
+# password attempts") before giving up, which looks like an install failure.
+if [ -z "${NABU_PW:-}" ]; then
+	if [ -t 0 ]; then
+		read -rsp "sudo password for $HOST (or set NABU_PW): " NABU_PW
+		echo
+	else
+		echo "NABU_PW is not set and stdin is not a terminal; run" >&2
+		echo "  NABU_PW=<password> $0 ..." >&2
+		exit 1
+	fi
+fi
 SSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8 cfm880@$HOST"
 
 say() { printf '%s\n' "$*"; }
@@ -87,7 +104,14 @@ if [ "$REBOOT" = 1 ]; then
 	say "== rebooting, waiting for the tablet"
 	sleep 30
 	for _ in $(seq 1 18); do
-		$SSH 'true' >/dev/null 2>&1 && { say "== back up"; exit 0; }
+		if $SSH 'true' >/dev/null 2>&1; then
+			say "== back up"
+			# Print the live cmdline: the only way to be sure the kernel we
+			# just installed is the one that booted (a full ESP silently keeps
+			# the old UKI, and UEFI happily boots it).
+			say "== running cmdline: $($SSH 'cat /proc/cmdline' 2>/dev/null)"
+			exit 0
+		fi
 		sleep 10
 	done
 	say "== tablet did not come back (check the screen / long press)"
