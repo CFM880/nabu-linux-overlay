@@ -1409,7 +1409,7 @@ resume 时 IC 状态读回全 0 ✗、reset-state 检查失败 ✗ ⇒ 控制器
   所有崩溃/唤醒取证的首选通道 ✓；但它在 dwc3 挂起时会消失 ✗（挂死瞬间仍看不到 ✗）。
 - 主机与平板换到 `192.168.1.0/24` ✓（平板 `192.168.1.5` ✓、构建机 `192.168.1.13` ✓）。
 
-#### 2.4.26 2026-10-21：真正的挂死链 —— 挂起中途的 VT unblank 触发 mdss 重使能 + `disp_cc_pll0` 锁不上
+#### 2.4.26 2026-10-21：~~真正的挂死链~~（**已被 2.4.27 推翻**：当时的结论只是链的下游现象）
 
 串口 console（`cat /dev/ttyACM0 >> log` ✓，`loglevel=4` ✓）终于抓到完整现场 ✓：
 
@@ -1449,6 +1449,74 @@ mtools 直连报 hidden-sector ✗ ⇒ `dd` 出来 → `mcopy` → `dd` 回去 �
 **观测结论（硬约束 ✓）**：freeze 之后文件系统与磁盘都挂起 ✗、`pstore` 不保 ✗、唯一 console 是
 USB gadget（随 dwc3 消失 ✗）⇒ **挂死点只能靠串口在挂起前/恢复后抓** ✗；崩溃 trace 建议
 `loglevel=4`（`ignore_loglevel` 会把 gadget 缓冲冲爆 ✗ ⇒ `[missed … bytes]` ✗）。
+
+#### 2.4.27 2026-10-23：真根因 —— `msm_mdss` overlay 的 `pm_runtime_force_suspend`（已修，实机验证）
+
+**结论（推翻 2.4.26）**：挂起卡死不在 `disp_cc_pll0`，也不在 VT unblank ✗。真正的原因是
+`nabu-display` 的 `msm_mdss.c` overlay 在系统挂起时用 `pm_runtime_force_suspend()` 把 mdss
+**提前强制 runtime 挂起** ✗ —— 这发生在面板 `disable` 回调发出 DCS 命令之前 ✗：
+
+```
+[ 46.7] Freezing user space processes completed
+[ 49.7] dsi_cmds2buf_tx: cmd dma tx failed, type=0x5, data0=0x28, len=4, ret=-110
+[ 49.7] panel-novatek-nt36523 ae94000.dsi.0: failed to set display off: -110
+[ 49.9] dsi_cmds2buf_tx: cmd dma tx failed, … data0=0x10 … ret=-110
+[ 49.9] panel-novatek-nt36523: failed to enter sleep mode: -110
+[ 50.2] panel-novatek-nt36523: Skipping unprepare of already unprepared panel
+[108.2] dsi_cmds2buf_tx: … data0=0xff … ret=-110        ← 恢复时也发不出去
+[108.2] panel-novatek-nt36523: failed to initialize panel: -110
+[113.7] dpu error: enc32 intl ctl 1 reset failure: -22
+[114.8] dpu error: wait for commit done returned -110
+[144.9] Restarting tasks … done. → PM: suspend exit      ← 卡了约 100 秒才回滚
+```
+
+⇒ 显示电源域已断 ✗ ⇒ DSI 命令 DMA 永远等不到完成（`-110`）✗ ⇒ 面板状态错乱 ✗ ⇒ 回滚时 DPU
+复位失败 ✗ ⇒ **屏幕只剩背光**（就是用户看到的"蓝底"）✓。
+
+**A/B/C 对照（同一台机器、最小产品、串口取证）**
+
+| 变体 | `msm_mdss` | `dsi_host` | 结果 |
+|---|---|---|---|
+| A | overlay | overlay | 挂起 ~100 s ✗、屏幕不回来 ✗ |
+| B | 上游 | 上游 | **挂起 1.25 s ✓、屏幕正常 ✓** |
+| C | overlay | 上游 | 挂起 ~100 s ✗（与 A 相同）|
+
+⇒ 元凶是 `msm_mdss.c` ✓。修复：`nabu-display` **删除** `msm_mdss.c` 与 `dsi_host.c` 两个
+overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟永久引用和 D-PHY reset 都是在给
+这个时序问题打补丁 ✓，一并删除 ✓。
+
+**模块二分（最小产品，每次加一个模块，实机验证）**
+
+| 组合 | 结果 |
+|---|---|
+| platform + display + serial | ✓ 可用 |
+| + touchscreen | ✓ 可用 |
+| + iris | ✓ 可用 |
+| + audio + accelerometer | ✓ 可用 |
+| **+ camera** | **✗ 唤不醒** |
+| **+ power**（不带 camera）| **✗ 唤不醒** |
+
+⇒ 还剩两个独立问题：`nabu-camera` 与 `nabu-power` 各自都会让唤醒失败 ✗（生产版两个都带 ✗，
+所以生产版必挂 ✗）。
+
+**方法论（以后查挂起必须照这个来）**
+
+- 串口节点是 `ttyACM0` / `ttyACM1` ✓（编号不固定 ✓），由 `nabu-serial` 的 gadget 提供 ✓。
+- **必须加 `no_console_suspend`** ✓：否则内核打印 `Suspending console(s)` 之后的所有输出
+  （包括失败的 suspend 回调与随后的 oops）**全部丢失** ✗ —— 这是之前一直抓不到栈的原因 ✓。
+- `initcall_debug` 会打印每个设备的 suspend/resume 回调与耗时 ✓，失败点一目了然 ✓。
+- `netconsole` 在本内核**不可用** ✗（`CONFIG_NETPOLL` 未开 ✗，而 `netconsole` 依赖它 ✓）；
+  `pstore`/`ramoops` 已证实在本机**不保** ✓（`/dev/kmsg` 标记在普通重启与
+  panic + `panic=10` 热重启后都不存在 ✓）。
+- 屏幕"蓝底" = 背光还在、DPU 已坏 ✓；此时整机通常**还活着** ✓（WiFi 会重连 ✓），
+  看起来像"整机挂死"其实是显示坏了 + 串口断了 ✓。
+
+**已修但仍有的小问题**
+
+- `qcom-iris`：VPU 掉电后重新上电，时钟 `status stuck at 'off'` ✗
+  （`clk_branch_toggle` WARN ✓，触发者是 `wireplumber` 打开解码器 ✓）—— 独立问题 ✓。
+- 触屏：resume 时重载固件 ✓ 正常 ✓；但在 suspend 过程中被 `blank=1` 触发重载会失败 ✗
+  （`Download Firmware failed (-1)` ✓，因为 IC 已断电 ✓），随后由 `nvt_ts_suspend` 收尾 ✓。
 
 ### 2.5 睡前 hook 与挂起并发 → 整机卡死（P1，已修，待实机验证）
 - **现象（2026-10-15 实机）**：亮屏、已登录图形会话时 `systemctl suspend`（或按电源键），

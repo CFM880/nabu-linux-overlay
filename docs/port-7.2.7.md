@@ -13,6 +13,27 @@
 
 ## 修改日志（最新在上）
 
+### 2026-10-23 挂起卡死的真根因：`msm_mdss` overlay 的 `pm_runtime_force_suspend`（已删）
+- 现象：按电源键熄屏/挂起后屏幕只剩背光（"蓝底"），整机看起来死掉；实际是**显示坏了 +
+  串口断了**，内核在约 100 秒后才超时回滚。
+- 根因：`nabu-display` 的 `msm_mdss.c` overlay 用 `pm_runtime_force_suspend()` 在系统挂起时
+  提前把 mdss 强制 runtime 挂起，**早于面板 `disable` 发出 DCS "display off / enter sleep"**，
+  于是 DSI 命令 DMA 永不完成：
+  ```
+  dsi_cmds2buf_tx: cmd dma tx failed, type=0x5, data0=0x28, len=4, ret=-110
+  panel-novatek-nt36523: failed to set display off: -110
+  … 恢复时 failed to initialize panel: -110 → dpu reset failure: -22 → commit -110
+  ```
+- 修复：**删除** `nabu-display/kernel-overlay/drivers/gpu/drm/msm/msm_mdss.c` 与
+  `…/dsi/dsi_host.c` 两个 overlay（`nabu-display` `c137a27`），只保留面板驱动。
+  之前加的 `core` 时钟永久引用、D-PHY reset 都是在给这个时序问题打补丁，一并删除。
+- 实测（最小产品 A/B/C 对照，串口取证）：上游 mdss+dsi = **挂起 1.25 s、屏幕正常恢复**；
+  带 `msm_mdss` overlay = 挂起 ~100 s、屏幕不回来。
+- 附带结论：`nabu-camera` 与 `nabu-power` 各自还会让唤醒失败（模块二分，见
+  `KNOWN-ISSUES.md` 2.4.27）；串口取证必须加 `no_console_suspend`，否则失败的 suspend
+  回调与随后的 oops 全部丢失。
+
+
 ### 2026-10-13 Debian 镜像“开机首个会话不旋转”：三处根因（getty 卡 boot / helper 提前 ON / proxy 启动竞态）
 - 现象：刷机后开机，**首个图形会话（GDM 登录页）与登录后的用户会话都不自动旋转**，注销重登后恢复。
 - 实机（`6.14.11-nabu-full`，`nabu-debian`，192.168.0.67）定位到三层，缺一不可：
