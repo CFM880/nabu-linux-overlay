@@ -109,6 +109,50 @@
   960x540 等）仍只能拿到对齐值。彻底解决需内核解析 VP9 头或改固件。
 - **相关历史**：`vp9-context-continuation.md`（VA-API 修复）。
 
+### 1.5 2026-10-23：Chrome / mpv 黑屏的真正原因 —— `/dev/dma_heap/system` 权限（已修，已固化）
+
+**现象**：VA-API 一切正常（`vainfo` 有 `VAProfileHEVCMain{,10} : VLD`、mpv 日志
+`v4l2-dec: device /dev/video0 driver 'iris_driver'`），但：
+- **Chrome 硬解 HEVC 完全黑屏** ✗，日志只有 `eglCreateImage failed 0x00003003` ✗，
+  之后**不报任何错** ✗（也不回退，就是黑屏）；
+- mpv `--vo=gpu --hwdec=vaapi` 打 `[vo/gpu] Loading failed.` ✗ 后**静默退回软解** ✗。
+
+**根因**：`/dev/dma_heap/system` 默认是 `crw------- root root` ✗ ⇒ 每次
+`vaCreateSurfaces` 都退回 **memfd** ✗ ⇒ **EGL 无法导入 memfd** ✗ ⇒ 整个"硬解呈现"
+链路断掉 ✓。驱动自己的注释写得很清楚（`99-qcom-iris-dmaheap.rules`）：
+
+> the default root-only mode makes every vaCreateSurfaces fall back to memfd,
+> which EGL cannot import, and Chrome then falls back to software decoding.
+
+**修复**：安装 `nabu-iris/config/99-qcom-iris-dmaheap.rules`
+（`SUBSYSTEM=="dma_heap", KERNEL=="system", MODE="0666"` ✓）。
+`iris-vaapi/install-system.sh` 本来就会装 ✓，但**镜像构建没走模块 install** ✗ ⇒
+新刷的 rootfs 里根本没有这条规则 ✗。已在 `nabu-main/debian/build.sh` 的
+`overlay_nabu_userspace()` 里补上（`nabu-main cf42a2d` ✓）。
+
+**修复后实测**（Chrome 156.0.8078.47，4K HEVC 8bit，`benchmarks/seek_harness`）：
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| `dma_heap unavailable` | 出现 ✗ | **0 次** ✓ |
+| `eglCreateImage failed` | 一堆 ✗ | **0 次** ✓ |
+| Canvas 帧哈希 | 恒定（黑帧）✗ | 445 样本 / **442 个不同** ✓ |
+| **seek 后旧帧（`stale_repeats`）** | 100%（无效测量）✗ | **0 / 445 = 0%** ✓ |
+| `stale_serial`（`VPU_FRAME_STAMP=1`）| — | **0 / 363 = 0%** ✓ |
+
+⇒ **M153 的 `ExtendedVideoBitstreamValidation` HEVC seek 回归（2.4 里记录的 70–90%）
+在 Chrome 156 上已经不存在** ✓，**不需要**再带
+`--disable-features=ExtendedVideoBitstreamValidation` ✓。
+
+**排查要点（下次别再走弯路）**：
+- Chrome 黑屏时**先看** `ls -l /dev/dma_heap/system` ✓，`crw-rw-rw-` 才是对的 ✓；
+- `vainfo` 正常 **不能**证明呈现链路正常 ✗（它只用 surface 不导入 ✓）；
+- mpv 用 **`--vo=dmabuf-wayland`** ✓：这是本机唯一真正零拷贝出画面的路径 ✓
+  （走 Wayland 原生 dmabuf ✓，绕开 EGL ✗）；`--vo=gpu` ✗ 会 `Loading failed` ✓，
+  `--vo=x11`（XWayland）✗ 直接退软解 ✓；
+- Chrome 没有 `dmabuf-wayland` 等价物 ✗，所以它**必须**靠 EGLImage ✓ —— 也就是说
+  `dma_heap` 那条规则对 Chrome **是硬性前提** ✓。
+
 ### 1.3 能力边界（P2）
 - VP9 160x90 因最小可见高度失败（160x96 通过）——`nabu-iris/docs/fluster-debug.md:32`。
 - 高度 >8192 直接不支持（`fluster-full.md`）。
