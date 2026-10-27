@@ -1590,15 +1590,43 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   一直是 `not attached`，`/dev/ttyACM0` 永远不出现，唯一的调试通道无声消失，只能 SSH 进去
   `echo on > .../power/control` 救回来。提交信息里“Type-C 控制台照常工作”只在**开机时线已插好**
   时成立，热插拔场景没有验证过。
-- **决定（2026-10-27）**：删除该 udev 规则，回到内核默认（`power/control = on`）。
-  这类策略应该在**驱动/内核层**做，而不是用 udev 从应用层强改 —— 应用层规避掩盖了内核缺陷。
-  代价：熄屏 idle 回到约 1.1 W，直到下面的内核工作完成。
-- **内核层待办**：
-  1. 修 `pm8150b` TCPM 的探测失败（deferred probe 的根因），让 CC/角色切换事件通到 dwc3；
-     之后控制器能否 runtime suspend、能否被电缆唤醒，应由 dwc3/dwc3-qcom 自己决定。
-  2. `xhci-hcd` 的 autosuspend 同样交给驱动默认值，不再由 udev 覆盖。
-  3. VPU（`aa00000.video-codec`）需要真正的 runtime PM 支持才能省电，见 **1.1 / 2.2**；
-     强设 `auto` 会让解码固件楔死（`session open failed: -110`）。
+- **决定（2026-10-27）**：删除该 udev 规则。这类策略应该在**驱动/内核层**做，而不是用
+  udev 从应用层强改 —— 应用层规避掩盖了内核缺陷。
+- **已按内核层实现（`nabu-power` `15e6eda`）**：
+  1. `qcom_pmi8998_charger.c` 把电缆状态发布成 extcon（`EXTCON_USB`，来自
+     `pm8150b-charger.online`）。这个中断走 **SPMI 常开域**，是 USB 模块断电后唯一还能
+     报事的来源 —— 这就是唤醒源。
+  2. `drivers/usb/dwc3/core.c`：外设端口消费该 extcon（`EPROBE_DEFER` 等充电器 probe），
+     自己 `pm_runtime_allow()`；VBUS 变化时调 `usb_gadget_connect()/disconnect()`。
+     **必须显式拉掉 pullup**：这个端口没有硬件断开事件，不这么做 `dwc->connected` 一直是
+     true，`dwc3_runtime_checks()` 永远拒绝 autosuspend（实测 `udc` 一直 `configured`）。
+  3. dtsi 把 extcon 接到 `&usb_1_dwc3`，并给 `&usb_1` 标 `wakeup-source`。
+- **实机验证（2026-10-27 18:44）**：拔线 → `ext=USB=0`、`udc=not attached`、
+  约 2 s 后 `runtime_status=suspended`；插回 → `active` + 重新枚举，全程不冻结。
+- **仍然待办**：
+  1. 熄屏 idle 功耗的复测（此前 udev 方案是 1.1 W → 0.6 W，现在应由内核方案拿回同样的收益）。
+  2. `pm8150b` TCPM 的 deferred probe 仍未解决，所以 `dr_mode` 仍是 `peripheral`（无 host/OTG）。
+  3. `xhci-hcd` / VPU 的 runtime PM 见 **1.1 / 2.2**。
+
+### 2.7 `console=ttyGS0` 会让关机卡死（P0，已修 2026-10-27）
+- **现象**：`systemctl reboot` 后屏幕停在 "The system will reboot now"，机器不重启、
+  不断电，只能长按电源键；journal 停在 `Reached target final.target`。
+- **串口证据**（`console=ttyGS0`，2026-10-27）：
+  ```
+  … reg-dummy reg-dummy: shutdown
+  … PM: Calling ledtrig_cpu_syscore_shutdown
+  … PM: Calling irq_gc_shutdown
+  … PM: Calling printk_kthreads_shutdown     ← 停在这里，永远等不到 "Restarting system"
+  ```
+- **根因**：内核控制台就是 USB gadget 本身。`device_shutdown()` 里 dwc3 先被拆掉，
+  `ttyGS0` 的主机端消失，而 printk 线程仍在往它写；紧接着
+  `printk_kthreads_shutdown()` 等这些线程收尾 ⇒ 死锁。
+  同一路径也解释了“拔插 USB 后整机冻结”：主机重枚举时 printk 正在写，日志里出现
+  `dwc3 a600000.usb: request … was not queued to ep1in` 之后整机卡死。
+- **修复**：`nabu-main/config/minimal.cmdline` 改成 `console=tty0`（production 本来就是），
+  gadget 只作为普通 tty 保留。实测连续 3 次重启 43–44 s 全部正常。
+- **注意**：**不要**再把 gadget 配成 printk 控制台；要远程内核日志请用 `netconsole`
+  （`config/nabu-netconsole.config` 已编入）而不是 USB gadget。
 
 
 ---

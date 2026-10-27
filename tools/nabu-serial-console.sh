@@ -5,33 +5,47 @@
 #
 # The tablet has no separate debug UART, so the only console is the USB gadget
 # (console=ttyGS0) on the Type-C port: plug the tablet into the host running
-# this script and it enumerates as /dev/ttyACM*.  The script reopens the port
-# across unplug/replug and host reboots (start it from a systemd --user unit or
-# a crontab @reboot line), logs to $LOG and stays out of the way.
+# this script and it enumerates as /dev/ttyACM*.  The script logs to $LOG and
+# stays out of the way (start it from a systemd --user unit or a crontab
+# @reboot line).
 #
 #   nabu-serial-console.sh [device] [log]
+#
+# The port is opened exactly once and then held open until the gadget actually
+# goes away.  An earlier version used "read -t 5" and re-opened the port after
+# every quiet period; every close drops DTR on the gadget side and the ACM
+# console does not survive that cleanly - it logs
+#
+#   dwc3 a600000.usb: request ... was not queued to ep1in
+#
+# and the tablet has been seen to freeze right afterwards.  Keeping the fd open
+# avoids poking the gadget at all.
 #
 # Note: this console dies with dwc3 when the system suspends, so it shows the
 # boot log, the suspend_prepare phase and any *successful* resume - not a wedge.
 
 PORT=${1:-/dev/ttyACM0}
 LOG=${2:-$HOME/nabu-serial.log}
-print_t() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" >> "$LOG"; }
+log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" >> "$LOG"; }
+
 was_up=
 while :; do
 	if [ ! -e "$PORT" ]; then
-		[ "$was_up" = no ] || print_t "[capture: $PORT absent, waiting]"
-		was_up=no; sleep 3; continue
+		[ "$was_up" = no ] || log "[capture: $PORT absent, waiting]"
+		was_up=no
+		sleep 2
+		continue
 	fi
-	stty -F "$PORT" 115200 raw -echo -crtscts clocal 2>/dev/null
 	if [ "$was_up" = no ]; then
-		print_t "[capture: $PORT open @115200]"; was_up=yes
+		log "[capture: $PORT open, holding it]"
+		was_up=yes
 	fi
-	# Bounded reads: after a host reboot the old fd stays "open" but never
-	# returns data, so a plain `while read` would sit there forever.
-	while IFS= read -r -t 5 line; do
+	# cat holds the fd open and only returns when the device is gone (unplug,
+	# reboot) or the driver errors out; then the loop re-opens it.
+	stdbuf -oL -eL cat "$PORT" 2>/dev/null |
+	while IFS= read -r line; do
 		printf '%s %s\n' "$(date +%H:%M:%S)" "$line"
-	done < "$PORT" >> "$LOG" 2>/dev/null
-	print_t "[capture: read timed out or EOF, reopening]"
+	done >> "$LOG"
+	log "[capture: reader ended, reopening]"
 	sleep 1
 done
