@@ -1579,6 +1579,27 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   `After=suspend.target`/`WantedBy=suspend.target`（恢复之后）。
 - **待验证**：重建/替换单元并重新 `enable` 后，亮屏按电源键休眠 → 唤醒，确认不再卡死。
 
+### 2.6 USB 控制器的 runtime PM 属于内核层，不再用 udev 规则规避（2026-10-27）
+- **旧做法**：`nabu-power/config/99-nabu-runtime-pm.rules` 把 `a600000.usb`（Type-C 的
+  dwc3）、`a800000.usb`（键盘盖）、`xhci-hcd.*.auto` 的 `power/control` 改成 `auto`。
+  实测（熄屏）idle 从 **1.1 W 降到 0.6 W**，所以动机是真实的。
+- **问题（2026-10-27 实机）**：`a600000.usb` 正是 CDC-ACM 串口控制台所在的控制器。
+  PM8150B 的 TCPM（`c440000.spmi:pmic@2:typec@1500`）在 nabu 上**永远 `-EPROBE_DEFER`**
+  （`deferred probe pending`），CC 检测不存在 ⇒ 插线事件没有任何人转告 dwc3 ⇒ 控制器已
+  runtime suspend 时**无法被唤醒**。表现为：开机后再插 USB，`/sys/class/udc/a600000.usb`
+  一直是 `not attached`，`/dev/ttyACM0` 永远不出现，唯一的调试通道无声消失，只能 SSH 进去
+  `echo on > .../power/control` 救回来。提交信息里“Type-C 控制台照常工作”只在**开机时线已插好**
+  时成立，热插拔场景没有验证过。
+- **决定（2026-10-27）**：删除该 udev 规则，回到内核默认（`power/control = on`）。
+  这类策略应该在**驱动/内核层**做，而不是用 udev 从应用层强改 —— 应用层规避掩盖了内核缺陷。
+  代价：熄屏 idle 回到约 1.1 W，直到下面的内核工作完成。
+- **内核层待办**：
+  1. 修 `pm8150b` TCPM 的探测失败（deferred probe 的根因），让 CC/角色切换事件通到 dwc3；
+     之后控制器能否 runtime suspend、能否被电缆唤醒，应由 dwc3/dwc3-qcom 自己决定。
+  2. `xhci-hcd` 的 autosuspend 同样交给驱动默认值，不再由 udev 覆盖。
+  3. VPU（`aa00000.video-codec`）需要真正的 runtime PM 支持才能省电，见 **1.1 / 2.2**；
+     强设 `auto` 会让解码固件楔死（`session open failed: -110`）。
+
 
 ---
 
