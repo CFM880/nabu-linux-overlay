@@ -1,3 +1,44 @@
+## 2026-10-27 USB：关机卡死的根因与内核层 runtime PM
+
+**1. `console=ttyGS0` 会让关机死锁（P0，已修）**
+
+`systemctl reboot` 后停在 "The system will reboot now"，只能长按电源键；journal 停在
+`Reached target final.target`。串口（gadget 控制台）给出的最后三行：
+
+```
+PM: Calling ledtrig_cpu_syscore_shutdown
+PM: Calling irq_gc_shutdown
+PM: Calling printk_kthreads_shutdown      ← 之后永远没有 "Restarting system"
+```
+
+根因：内核控制台就是 USB gadget 本身。`device_shutdown()` 先拆 dwc3，`ttyGS0` 的主机端消失，
+printk 线程仍在往它写，`printk_kthreads_shutdown()` 等它们收尾 ⇒ 死锁。同一路径也解释了
+“拔插 USB 后整机冻结”（`dwc3 a600000.usb: request … was not queued to ep1in` 之后卡死）。
+修复：`nabu-main/config/minimal.cmdline` 改 `console=tty0`，gadget 只作普通 tty。
+实测连续重启 3 次，43/43/44 s，全部正常。
+
+**2. Type-C 控制器的 runtime PM 改到驱动里（`nabu-power` `15e6eda`）**
+
+- 充电器把电缆状态发布成 extcon（`EXTCON_USB`，来自 `pm8150b-charger.online`），
+  中断在 SPMI 常开域 —— USB 模块断电后唯一还能报事的唤醒源。
+- `drivers/usb/dwc3/core.c`：外设端口消费该 extcon（`EPROBE_DEFER` 等充电器），
+  `pm_runtime_allow()`，并在 VBUS 变化时 `usb_gadget_connect()/disconnect()`。
+  **必须显式拉 pullup**：该端口没有硬件断开事件，否则 `dwc->connected` 恒为 true，
+  `dwc3_runtime_checks()` 永远拒绝 autosuspend。
+- 实测：拔线 → `udc=not attached` → 约 2 s 后 `runtime_status=suspended`；插回 → `active`
+  并重新枚举，全程无冻结。udev 规则已删除。
+
+**3. 功耗实测（电池、熄屏不挂起，`bl_power=4`）**
+
+| 状态 | 功耗 |
+|---|---|
+| Type-C 控制器 `active` | 0.63 W |
+| Type-C 控制器 `suspended` | 0.60 W |
+
+⇒ Type-C 挂起只值 ~40 mW；当年 udev 规则记录的 1.1 W → 0.6 W 里，**1.1 W 的基线已经不存在**
+（显示/suspend 修复之后，全部控制器 `on` 也已经是 0.6 W）。键盘盖 `a800000.usb` 与
+`xhci-hcd` 设 `auto` 后并不挂起（插着设备），实测无可测收益，因此保持内核默认 `on`。
+
 # Linux 7.2.7 nabu 移植记录
 
 小米平板 5（nabu，SM8150）从 6.14.11 移植到 Linux 7.2.7 的修改记录。
