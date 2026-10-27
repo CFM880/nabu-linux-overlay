@@ -1608,6 +1608,24 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   2. `pm8150b` TCPM 的 deferred probe 仍未解决，所以 `dr_mode` 仍是 `peripheral`（无 host/OTG）。
   3. `xhci-hcd` / VPU 的 runtime PM 见 **1.1 / 2.2**。
 
+### 2.6.1 Type-C host 模式：控制器与供电已就绪，数据通路不通（P1，待查 2026-10-27）
+- **已实现（`nabu-power`）**：用 SMB5 的角色开关取代 TCPM ——
+  `/sys/bus/platform/devices/c440000.spmi:pmic@2:charger@1000/typec_role`
+  写 `host` / `device` / `auto`；`host` 会切 dwc3 到 host 并打开 SMB5 的
+  `usb-otg-vbus` 5V boost。
+- **实测（2026-10-27）**：
+  - `echo host` → `typec: role 0 -> 1`、`usb3/usb4 xHCI` 正常注册 ✓
+  - 5V boost 真的在供电：电池电流从 ~-400 mA 跳到 **-765 mA**（移动硬盘在转）✓
+  - 但 **`usb3` 上没有 `3-1` 设备**、dmesg 没有 `new high-speed USB device` ✗
+    （换 Type-C 耳机同样不枚举，电流回到 -481 mA）
+- **结论**：主机控制器 + VBUS 都 OK，**数据线（D+/D-）在 host 模式下没有到达 dwc3 PHY**。
+  设备模式是通的（`udc=configured`、能枚举），所以 PHY/走线本身没问题。
+- **下一步要查**：
+  1. SMB5 的 DPDM 开关（`DPDM_CFG`）是否把 D+/D- 扣在充电器侧 ——
+     本驱动没有 `dpdm-supply`，也就没人把 DPDM 切回 SoC；APSD 用完是否释放需确认；
+  2. Type-C SBU/SS mux（`i2c4/typec-mux@43` fsa4480）在 host 下的 orient 状态；
+  3. 用 devmem 读 xHCI `PORTSC` 看是否连 D+ 上拉都没看到（区分“没接线”和“接了但枚举失败”）。
+
 ### 2.7 `console=ttyGS0` 会让关机卡死（P0，已修 2026-10-27）
 - **现象**：`systemctl reboot` 后屏幕停在 "The system will reboot now"，机器不重启、
   不断电，只能长按电源键；journal 停在 `Reached target final.target`。
