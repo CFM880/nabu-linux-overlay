@@ -1618,9 +1618,22 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   已置位就跳过 profile 写入与 restart；只有 profile 缺失（PMIC 掉电后首次开机）才写。
 - **验证**：`integrity=0x9` → 日志 `battery profile already present ... keeping gauge state`；
   连续重启 93% → 92% → 91% ✓（修前一次重启跳 ~20 点）。
-- **仍未解决（精度，非跳变）**：SOC 模型本身在充放电时仍偏快（充电实测 260 mAh 报 8.2%，
-  即 2.7×；放电 108 mAh 报 2.0%，即 1.6×）。怀疑 DT 里的 `qcom,fg-profile-data`
-  （单一 K82 sunwoda profile）与实际电芯不符；解法是对比设备自带 profile，见 5.x。
+- **仍未解决（精度，非跳变）**：SOC 模型本身仍然偏快。修复后重测（2026-10-28 12:40–12:53，
+  13 分钟充电、平均 0.73 A）：
+
+  | 指标 | 数值 |
+  |---|---|
+  | ∫I·dt（实测充入）| **148 mAh** |
+  | ΔSOC | **90% → 96%**（+6% ⇒ 按 8720 mAh 是 523 mAh）|
+  | 比例 | **3.5×** ✗ |
+
+  也就是说电量计认为充进去的电荷是实测的 3.5 倍 —— 相当于它以为电池只有 ~2500 mAh。
+- **profile 已排除**：DT 里的 `qcom,fg-profile-data`（416 B）经确认就是设备原厂那份
+  （vendor `fg-gen4-batterydata-nabu-sunwoda-8720mah.dtsi`，见 `sm8150-xiaomi-nabu-power.dtsi`），
+  且现在只加载一次 ✓。所以问题在 gauge 的 SOC 参数/模型，不在 profile 缺失。
+- **下一步选择**：要么拿到 vendor 的 SRAM SYS_CONFIG / KI 系数布局去校准（信息不在本树里），
+  要么在驱动里做**软件库仑计**（积分 `BATT_CURRENT` 得到 charge_counter，唤醒时累计、
+  挂起前后用 gauge 做校正）——后者可控，且能顺带把“挂起期间耗电”量出来。
 - **库仑计调查结论（2026-10-28）**：试图用 FG SRAM 里的硬件计数器替代 SOC ——
   候选字 `0x1ac/0x1ae` 在充电/放电两侧的 `Δ/mAh` 不一致（+229 vs −444 /mAh），
   不是电荷计数器 ✗；这块 SRAM 映射没有可用的计数寄存器，驱动里也没定义。
