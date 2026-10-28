@@ -1608,6 +1608,23 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   2. `pm8150b` TCPM 的 deferred probe 仍未解决，所以 `dr_mode` 仍是 `peripheral`（无 host/OTG）。
   3. `xhci-hcd` / VPU 的 runtime PM 见 **1.1 / 2.2**。
 
+### 2.6.2 电量百分比会跳 20 点、充电“四分钟充满”（P1，跳变已修 2026-10-28）
+- **现象**：一晚 91% → 56%，重启后 4 分钟内 56% → 77% → 100%；
+  `8720 mAh` 的电池 4 分钟涨 21% 需要 26 A，而充电器只有 3 A ⇒ 是**电量计重估**，不是充电 ✗。
+- **根因**：`qcom_fg_gen4_load_profile()` **每次开机**都写 profile 并 `HLOS_RESTART`。
+  restart 让电量计算法丢掉累计状态、从开路电压重新估算 SOC ⇒ 每次重启都跳点 ✗。
+  （profile 存在 PMIC SRAM 里，AP 重启不影响 PMIC 供电，本来就该只写一次 ✓。）
+- **修复（`nabu-power` `29c2178`）**：先读 `PROFILE_INTEGRITY` 的 `PROFILE_LOAD_BIT`，
+  已置位就跳过 profile 写入与 restart；只有 profile 缺失（PMIC 掉电后首次开机）才写。
+- **验证**：`integrity=0x9` → 日志 `battery profile already present ... keeping gauge state`；
+  连续重启 93% → 92% → 91% ✓（修前一次重启跳 ~20 点）。
+- **仍未解决（精度，非跳变）**：SOC 模型本身在充放电时仍偏快（充电实测 260 mAh 报 8.2%，
+  即 2.7×；放电 108 mAh 报 2.0%，即 1.6×）。怀疑 DT 里的 `qcom,fg-profile-data`
+  （单一 K82 sunwoda profile）与实际电芯不符；解法是对比设备自带 profile，见 5.x。
+- **库仑计调查结论（2026-10-28）**：试图用 FG SRAM 里的硬件计数器替代 SOC ——
+  候选字 `0x1ac/0x1ae` 在充电/放电两侧的 `Δ/mAh` 不一致（+229 vs −444 /mAh），
+  不是电荷计数器 ✗；这块 SRAM 映射没有可用的计数寄存器，驱动里也没定义。
+
 ### 2.6.1 Type-C host 模式：控制器与供电已就绪，数据通路不通（P1，待查 2026-10-27）
 - **已实现（`nabu-power`）**：用 SMB5 的角色开关取代 TCPM ——
   `/sys/bus/platform/devices/c440000.spmi:pmic@2:charger@1000/typec_role`
