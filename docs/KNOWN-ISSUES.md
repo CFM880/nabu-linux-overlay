@@ -1726,7 +1726,23 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   与 usb3/usb4 ✓）、供电 ✓、PHY DPDM 归属 ✗（已修但不生效）。
   注意：**开机后第一次切 host 会丢** ✗（第二次 `auto` → `host` 才生效 ✓），
   这是驱动里 `usb_role_switch_set_role()` 返回值的时序问题，需要重试 ✓。
-- **下一步（明确的三选一，不必再猜）**：
+- **2026-10-28 19:20 决定性实验（结论收敛到一点）**：
+  - 固定 `dr_mode = "host"`（绕过 role switch）+ `nabu,otg-force-on`（强制开 boost）后：
+    `OTG boost forced on` ✓、`usb-otg-vbus enabled=1` ✓，但
+    **端口电压 `usbin_v = 0`** ✗、PORTCS 仍 `0x0100` ✗；
+  - ⇒ **5V 根本没出到端口** ✗，所以“数据线”从来不是首要问题 ✓；
+  - ⇒ 根因收敛到：**SMB5 的 Type-C 电源角色没有真正切到 source/DFP** ✗。
+    证据：Type-C 块的寄存器**读回恒为 0**（`typec init: drp write rc=0` 但 `ctrl=0x0` ✗），
+    而 SMB5 只有在 DFP/source 状态下才会把 boost 的 5V 接到 VBUS 上 ✗。
+  - 同时确认了“不是 role switch 的问题” ✓：`dr_mode=host` 时 dwc3 的
+    `GCTL.PrtCapDir = 1 (HOST)` ✓、PHY `UTMI_CTRL0` 的 OPMODE = NORMAL ✓、
+    `DATAPATH_OVERRIDE` 未置位 ✓、`GUSB2PHYCFG(0)` TRDTIM 正常 ✓。
+- **下一步（收敛后的单点）**：
+  1. 让 Type-C 块真正进入 source/DFP：核实 `TYPE_C_INTRPT_ENB_SOFTWARE_CTRL`(0x1368)
+     的写入为什么读回 0（是否需要先置 `TYPE_C_CFG.TYPEC_OR_U_USB`、
+     或该块需要独立使能/时钟 ✗）；写出后 `usbin_v` 应变成 ~5000 mV ✓；
+  2. 一旦端口有 5V，再回到 PORTCS 看 `connect`（数据线问题此时才需要查 fsa4480 ✓）。
+- **旧的排查记录（保留）**：
   1. 临时把 DT 改成 `dr_mode = "host"` 并**固定**，绕过 role-switch 路径 ——
      如果这样能枚举 ⇒ 问题在角色切换/时序 ✗；仍不能 ⇒ 在 PHY/硬件 ✗；
   2. 用 devmem 读 dwc3 的 `GUSB2PHYCFG` / `GCTL`（看 PRTCAP 是否真的切到 HOST）与
