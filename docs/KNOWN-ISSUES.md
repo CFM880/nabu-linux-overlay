@@ -1711,11 +1711,27 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
     （换 Type-C 耳机同样不枚举，电流回到 -481 mA）
 - **结论**：主机控制器 + VBUS 都 OK，**数据线（D+/D-）在 host 模式下没有到达 dwc3 PHY**。
   设备模式是通的（`udc=configured`、能枚举），所以 PHY/走线本身没问题。
-- **下一步要查**：
-  1. SMB5 的 DPDM 开关（`DPDM_CFG`）是否把 D+/D- 扣在充电器侧 ——
-     本驱动没有 `dpdm-supply`，也就没人把 DPDM 切回 SoC；APSD 用完是否释放需确认；
-  2. Type-C SBU/SS mux（`i2c4/typec-mux@43` fsa4480）在 host 下的 orient 状态；
-  3. 用 devmem 读 xHCI `PORTSC` 看是否连 D+ 上拉都没看到（区分“没接线”和“接了但枚举失败”）。
+- **2026-10-28 19:00 追加排查结果**：
+  - xHCI `PORTSC` 实测 **`0x0100`（只有 PP=port power，没有 CCS=connect）** ✗ ——
+    确认端口**完全看不到设备**，不是“看到了但枚举失败”；
+  - 此时 **OTG boost 正常**（`usb-otg-vbus` 5000 mV，电池电流 -0.75 A ≈ 3.2 W 对外供电 ✓），
+    说明设备在吃电、供电链路通 ✓；
+  - `dpdm-supply = <&usb_1_hsphy>` 已加回（原来删掉了 ✗），驱动只在 APSD 期间 enable，
+    其余时间 disable ⇒ D+/D- 应归 PHY ✓；
+  - 发现并修了主线 PHY 驱动的 bug ✗：`dpdm_disable()` 只清标志、**不恢复
+    `OPMODE_NONDRIVING` / `UTMI_PHY_DATAPATH_CTRL_OVERRIDE_EN` 那些位** ✗ ⇒ PHY 永久高阻 ✗。
+    已补 `dpdm_disable()` + `phy_init()` 两处恢复（`nabu-power` `f6cd14f`）✓；
+  - **但修完 PORTSC 仍是 `0x0100`** ✗（连 USB2 的 Type-C 耳机都不枚举 ✗）。
+- **排查中排除的**：角色切换 ✓（`typec: role 0 -> 1`）、主机控制器注册 ✓（`xhci-hcd.5.auto`
+  与 usb3/usb4 ✓）、供电 ✓、PHY DPDM 归属 ✗（已修但不生效）。
+  注意：**开机后第一次切 host 会丢** ✗（第二次 `auto` → `host` 才生效 ✓），
+  这是驱动里 `usb_role_switch_set_role()` 返回值的时序问题，需要重试 ✓。
+- **下一步（明确的三选一，不必再猜）**：
+  1. 临时把 DT 改成 `dr_mode = "host"` 并**固定**，绕过 role-switch 路径 ——
+     如果这样能枚举 ⇒ 问题在角色切换/时序 ✗；仍不能 ⇒ 在 PHY/硬件 ✗；
+  2. 用 devmem 读 dwc3 的 `GUSB2PHYCFG` / `GCTL`（看 PRTCAP 是否真的切到 HOST）与
+     PHY 的 `USB2_PHY_USB_PHY_UTMI_CTRL0`（看 OPMODE 是否真的 NORMAL）✓；
+  3. 查 `i2c4/typec-mux@43`（fsa4480）在 host 下的 orient 是否影响 D+/D-（通常只切 SBU/SS）。
 
 ### 2.7 `console=ttyGS0` 会让关机卡死（P0，已修 2026-10-27）
 - **现象**：`systemctl reboot` 后屏幕停在 "The system will reboot now"，机器不重启、
