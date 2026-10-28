@@ -1631,9 +1631,25 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
 - **profile 已排除**：DT 里的 `qcom,fg-profile-data`（416 B）经确认就是设备原厂那份
   （vendor `fg-gen4-batterydata-nabu-sunwoda-8720mah.dtsi`，见 `sm8150-xiaomi-nabu-power.dtsi`），
   且现在只加载一次 ✓。所以问题在 gauge 的 SOC 参数/模型，不在 profile 缺失。
-- **下一步选择**：要么拿到 vendor 的 SRAM SYS_CONFIG / KI 系数布局去校准（信息不在本树里），
-  要么在驱动里做**软件库仑计**（积分 `BATT_CURRENT` 得到 charge_counter，唤醒时累计、
-  挂起前后用 gauge 做校正）——后者可控，且能顺带把“挂起期间耗电”量出来。
+- **已做的两个修复**（`nabu-power` `29c2178`、`3b56988`）：profile 只加载一次；
+  `ACT_BATT_CAP`（SRAM word 285）从未初始化 ⇒ 用 `qcom,fg-batt-capacity-mah = <8720>`
+  种入。效果：报告电荷从实测的 **3.5×** 降到 **2.3×** ✓（仍是错的，但方向对）。
+- **已排除**：
+  - profile：`profile_dump` 读回 SRAM 内容与 DT 那 416 B **逐字节一致** ✓；
+  - KI 系数：值与编码（315/183，1000/61035）与 vendor `qpnp-fg-gen4.c` **完全一致** ✓；
+  - vendor 对 nabu 只有一份 profile（`fg-gen4-batterydata-nabu-sunwoda-8720mah.dtsi`）✓。
+- **实测（2026-10-28，满载放电 15 min）**：∫I·dt = 341 mAh，电量 100% → 91%（-9%）
+  ⇒ 模型等效容量 ≈ 341/0.09 ≈ **3790 mAh**，而实际 8720 mAh。
+- **下一步（尚未做完，留给后续）**：
+  1. 我们报的是**寄存器 0x009（monotonic SOC，平滑用）**，vendor 报的是
+     **SRAM `BATT_SOC`（word 449，0.01%）**；而我们的读出是乱数（`ff 19 49 47`），
+     怀疑需要 **ATOMIC/IMA 访问模式**（我们的 `qcom_fg_gen4_sram_rw()` 只有一种模式）✗；
+  2. vendor `fg_gen4_hw_init()` 还写 `ESR`(w331)、`ESR_PULSE_THRESH`(w12, 默认 47 mA)、
+     `RCONN`(w275)、`BATT_TEMP_COLD/HOT`（`BATT_TEMP_CONFIG_WORD`），我们都没写；
+  3. vendor 还有 ESR 快校准 / 容量学习（`ACT_BATT_CAP` 由充放电循环学习并备份到 SDAM），
+     我们只是种了一个固定值。
+- **测量工具（已随驱动安装）**：`…/fuel-gauge@4000/soc_params`（vendor 那几个 SRAM 参数）、
+  `…/profile_dump`（416 B profile）、`…/sram_dump`（寄存器 0x180–0x1fe）。
 - **库仑计调查结论（2026-10-28）**：试图用 FG SRAM 里的硬件计数器替代 SOC ——
   候选字 `0x1ac/0x1ae` 在充电/放电两侧的 `Δ/mAh` 不一致（+229 vs −444 /mAh），
   不是电荷计数器 ✗；这块 SRAM 映射没有可用的计数寄存器，驱动里也没定义。
