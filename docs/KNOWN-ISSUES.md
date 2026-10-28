@@ -1713,14 +1713,20 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   - Type-C 耳机枚举为 `AB13X USB Audio`（Bus 003 Device 002）✓，
     `snd-usb-audio` 绑定 ✓，`/proc/asound` 多出 card 1 ✓
   - PORTCS 从 `0000.0100`（只有 power）变成 **`0000.0103`（power|enable|connect）** ✓
-- **已知限制（手工两步）**：dwc3 会**丢弃开机后第一次角色切换**（host 控制器不出现，
-  而 `usb_role_switch_get_role()` 因为缓存仍报成功 ✗），可用的操作是：
+- **用法（`nabu-power` `747e7a1`，已封装成命令）**：
   ```sh
-  echo auto > /sys/bus/platform/devices/c440000.spmi:pmic@2:charger@1000/typec_role
-  sleep 3
-  echo host > /sys/bus/platform/devices/c440000.spmi:pmic@2:charger@1000/typec_role
+  sudo nabu-typec host      # 主机模式：对外 5V，U盘/耳机/键盘可用（充电同时停止）
+  sudo nabu-typec device    # 设备模式：充电器 / 接电脑
+  sudo nabu-typec status    # 打印当前角色、端口电压、USB 树
   ```
-  在驱动内部做重试/回弹试过，反而把状态搞坏 ✗，所以先留给调用方 ✓。
+  脚本内部就是“`auto` → 等 3 秒 → `host`”那两步 ✓，并顺手把端口电压和总线状态打出来
+  （失败时一眼可见 ✓）。
+- **已知限制**：dwc3 会**丢弃开机后第一次角色切换**（host 控制器不出现，而
+  `usb_role_switch_get_role()` 因为缓存仍报成功 ✗）⇒ 所以必须两步 ✓。
+  在驱动内部做重试/回弹试过，反而把状态搞坏 ✗（还一度把 boost 开关弄丢 ✗，已修 ✓）。
+- **实机验证（2026-10-28 20:10）**：`sudo nabu-typec host` →
+  `port 5V: 4.99 V` ✓、`Bus 003 Port 001: Dev 002`（Audio ×3 `snd-usb-audio` + HID ×1）✓、
+  `/proc/asound` 从 1 张变 2 张 ✓、设备 `001f:0b21 Walmart AB13X Headset Adapter` ✓。
 
 ### 2.6.1 Type-C host 模式：控制器与供电已就绪，数据通路不通（P1，待查 2026-10-27）
 - **已实现（`nabu-power`）**：用 SMB5 的角色开关取代 TCPM ——
