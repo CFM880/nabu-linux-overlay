@@ -1699,6 +1699,29 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   候选字 `0x1ac/0x1ae` 在充电/放电两侧的 `Δ/mAh` 不一致（+229 vs −444 /mAh），
   不是电荷计数器 ✗；这块 SRAM 映射没有可用的计数寄存器，驱动里也没定义。
 
+### 2.6.0 Type-C host 已打通（2026-10-28，手工切换）
+- **根因（两个，都在 `nabu-power` `ba7bf92` 修好）**：
+  1. **Type-C 块基址错了** ✗：SMB5 的 Type-C 寄存器在 **0x1500**（`MODE_CFG`=0x1544，
+     `SNK/SRC/STATE/MISC` 状态=0x1506/0x1508/0x1509/0x150B），而驱动一直用
+     `chip->base(0x1000)+0x368 = 0x1368` ✗ —— 写到了完全无关的寄存器，
+     状态也全读回 0 ✗（正好对上日志里的 `drp write rc=0`、`ctrl=0x0`）；
+  2. **电源角色位定义反了** ✗：`smb5-reg.h` 里 `BIT(2)=EN_SRC_ONLY`、
+     `BIT(1)=EN_SNK_ONLY`，而驱动把 BIT(2) 叫 `UFP_EN`、BIT(1) 叫 `DFP_EN` ✗，
+     “开 DRP”时写 `BIT(1)|BIT(2)` 是**无效组合** ✗ ⇒ 端口一直停在上电默认角色 ✗。
+- **效果**：`echo host > .../typec_role` 后
+  - 端口电压 `usbin_v` 从 **0 V → ~4.99 V** ✓✓（SMB5 真正进入 source ✓）
+  - Type-C 耳机枚举为 `AB13X USB Audio`（Bus 003 Device 002）✓，
+    `snd-usb-audio` 绑定 ✓，`/proc/asound` 多出 card 1 ✓
+  - PORTCS 从 `0000.0100`（只有 power）变成 **`0000.0103`（power|enable|connect）** ✓
+- **已知限制（手工两步）**：dwc3 会**丢弃开机后第一次角色切换**（host 控制器不出现，
+  而 `usb_role_switch_get_role()` 因为缓存仍报成功 ✗），可用的操作是：
+  ```sh
+  echo auto > /sys/bus/platform/devices/c440000.spmi:pmic@2:charger@1000/typec_role
+  sleep 3
+  echo host > /sys/bus/platform/devices/c440000.spmi:pmic@2:charger@1000/typec_role
+  ```
+  在驱动内部做重试/回弹试过，反而把状态搞坏 ✗，所以先留给调用方 ✓。
+
 ### 2.6.1 Type-C host 模式：控制器与供电已就绪，数据通路不通（P1，待查 2026-10-27）
 - **已实现（`nabu-power`）**：用 SMB5 的角色开关取代 TCPM ——
   `/sys/bus/platform/devices/c440000.spmi:pmic@2:charger@1000/typec_role`
