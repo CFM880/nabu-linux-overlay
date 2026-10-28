@@ -1640,10 +1640,21 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   - vendor 对 nabu 只有一份 profile（`fg-gen4-batterydata-nabu-sunwoda-8720mah.dtsi`）✓。
 - **实测（2026-10-28，满载放电 15 min）**：∫I·dt = 341 mAh，电量 100% → 91%（-9%）
   ⇒ 模型等效容量 ≈ 341/0.09 ≈ **3790 mAh**，而实际 8720 mAh。
+- **已修（`nabu-power` `87c0d49`）**：vendor 有 v1/v2 两套 SRAM 参数表，
+  **v2 才是默认**（v1 只给 PM8150B rev 1.0）。我们原来用的是 v1 的 word
+  （`ACT_BATT_CAP` 285 / `BATT_SOC` 449），在 v2 芯片上属于别的参数 ✗ ⇒
+  容量种错位置、读到乱数。改成 v2（287 / 455 / 461 / 466 / 469）后，
+  `ACT_BATT_CAP` 回读 `0x2210` = 8720 mAh ✓（种对了）。
+- **仍未解决（关键）**：即便用正确的 v2 word，**`BATT_SOC` 读出来仍是噪声**
+  （`0xdf76c4c0`，越界 ⇒ 代码回退到 monotonic 寄存器），`CC_SOC`/`MONOTONIC`
+  同样不合理。这说明**电量计算法本身没有在维护这些值** —— vendor 驱动为此还有：
+  `SOC_UPDATE` 中断驱动的原子访问、ESR 快校准状态机、容量学习（写回 SDAM）、
+  PBS/profile 处理等一整条流水线，我们都没移植 ✗。
+- **结论**：要让硬件电量计真正可用 = **整体移植 vendor 的 `qpnp-fg-gen4`**
+  （估 500–1000 行 + 多轮实机校准），不是“再补两个参数”能解决的 ✗。
 - **下一步（尚未做完，留给后续）**：
-  1. 我们报的是**寄存器 0x009（monotonic SOC，平滑用）**，vendor 报的是
-     **SRAM `BATT_SOC`（word 449，0.01%）**；而我们的读出是乱数（`ff 19 49 47`），
-     怀疑需要 **ATOMIC/IMA 访问模式**（我们的 `qcom_fg_gen4_sram_rw()` 只有一种模式）✗；
+  1. `BATT_SOC` 需要一个正确维护它的算法：vendor 的 `fg_gen4` 初始化 + 校准流水线；
+
   2. vendor `fg_gen4_hw_init()` 还写 `ESR`(w331)、`ESR_PULSE_THRESH`(w12, 默认 47 mA)、
      `RCONN`(w275)、`BATT_TEMP_COLD/HOT`（`BATT_TEMP_CONFIG_WORD`），我们都没写；
   3. vendor 还有 ESR 快校准 / 容量学习（`ACT_BATT_CAP` 由充放电循环学习并备份到 SDAM），
