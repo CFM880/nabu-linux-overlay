@@ -1874,6 +1874,18 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
      PHY 的 `USB2_PHY_USB_PHY_UTMI_CTRL0`（看 OPMODE 是否真的 NORMAL）✓；
   3. 查 `i2c4/typec-mux@43`（fsa4480）在 host 下的 orient 是否影响 D+/D-（通常只切 SBU/SS）。
 
+### 2.6.3 host 模式退不出去：先插耳机、再插充电器就充不上电（2026-10-29，已修 `nabu-power 08ec0b0`）
+- **现象**：先插耳机（识别正常 ✓），拔掉后插充电器 ⇒ **完全充不进电** ✗
+  （`online=0`、`MODE_CFG=0x04`(SRC_ONLY)、`OTG_CMD=0x01`、VBUS 显示 5.0 V 是我们自己的升压 ✗）。
+- **根因**：host 的 latch 写错了 ✗ —— “连续 5 次看不到设备”之后又落回 `role = HOST` ✗，
+  等于**永远退不出 host** ✗。于是端口一直在源模式给端口灌 5 V，充电器插上来也发现不了 ✗
+  （我们自己的 VBUS 盖住了它 ✓）。
+- **修复**：5 次都看不到设备 ⇒ 回到 **device + DRP** ✓（顺便关升压 ✓、重跑 APSD ✓），
+  下一个设备/充电器就能正常识别 ✓。顺带修了强制角色路径：`echo host` 之前只切 USB 角色
+  和升压，**没写 Type-C 模式** ✗（端口还在 DRP，设备看不到 Rp ✗），现在会一起写 ✓。
+- **实测**：`echo host` ⇒ `MODE=0x04 / OTG=0x01` 立即生效 ✓；`echo auto`（充电器插着）
+  3 秒内回到 `MODE=0x10 / OTG=0x00 / online=1`，电池 **+1.0 A** ✓。
+
 ### 2.7 `console=ttyGS0` 会让关机卡死（P0，已修 2026-10-27）
 - **现象**：`systemctl reboot` 后屏幕停在 "The system will reboot now"，机器不重启、
   不断电，只能长按电源键；journal 停在 `Reached target final.target`。
