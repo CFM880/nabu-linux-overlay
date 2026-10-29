@@ -1736,6 +1736,13 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
     | Type-C 耳机 | `attached=1 we_are_source=1` → `role 2 -> 1` | PORT 5V **4.99 V** ✓、6 个 `usb 3-x` 节点 ✓、声卡 2 张 ✓ |
     | 充电器 / PC | `attached=1 we_are_source=0` → `role 0 -> 2` | 保持 device ✓、充电不受影响 ✓ |
   - 稳定：30 秒采样 `role=auto`、4.99 V 恒定、设备数不变、日志仅 3 次开机切换（无抖动 ✓）；
+  - **host → device 时补跑 APSD（`355ce3e`）**：从 host 模式退出时，充电器**一直看到 VBUS 存在** ✗
+    ⇒ 它的 plug 中断不触发 ✗ ⇒ 不做充电器分类 ✗ ⇒ “拔耳机后插充电器不被识别、要再插一次” ✗。
+    现在在 host→device 切换时主动 `schedule status_change_work`（即重跑 APSD ✓）。
+    实测一次插拔序列（拔充电器 → 插耳机 → 拔耳机 → 插充电器）：
+    `role 2→1`（host ✓）→ `role 1→2`（回 device ✓）→ `attached=1 we_are_source=0` →
+    `APSD: charger type DCP, input limit 3000000uA` ✓，端到端约 11 s
+    （其中约 8 s 是 Type-C 双角色轮转的固有延迟 ✓）；
   - **关键坑（`03ec52a`）**：模式缓存初值是 `0 == USB_ROLE_NONE` ✗，与“空闲模式”相同
     ⇒ 第一次 DRP 写入被当成“没变化”跳过 ✗ ⇒ 端口一直停在 sink-only ✗、不供 5 V ✗
     ⇒ sink 设备（耳机/U盘）永远检测不到 ✗。改成初值 `-1` 后立刻正常 ✓。
