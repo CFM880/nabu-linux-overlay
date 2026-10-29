@@ -1761,6 +1761,12 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   1. **只要充电器报 VBUS 存在就绝不切 host** ✓（sink 设备本身不供电，不会误伤 ✓）；
   2. **host 判定需连续两次一致** ✓（过滤轮转毛刺 ✓）。
   实测 90 秒：`online=1`、`status=Charging`、`role=auto` 全程恒定 ✓（94% 涓流 10–20 mA ✓）。
+- **“拔掉充电器后插耳机识别不到”（2026-10-29 15:51，已修 `1df196c`）**：
+  host 判定要求**连续两次一致** ✓，而轮询周期在“稳定”时是 30 秒 ✗ ⇒ 第二次采样要等 30 秒 ✗
+  ⇒ 明明已经读到 `MISC=0xc9`（attached + we_are_source ✓）却迟迟不切 host ✗。
+  改为：**只要判定未落定就 1 秒轮询** ✓（投票中 / 刚发生状态变化 / dwc3 settle / sink-hold ✓），
+  稳定后回到 30 秒兜底 ✓（省电 ✓）。
+  实测：耳机插着 → `MODE_CFG=0x04`(source) ✓、端口 4.98 V ✓、6 个 `usb 3-x` ✓、声卡 2 张 ✓。
 - **旧的“部分生效”记录（保留）**：
   - 已实现：每 2 s 读 `TYPE_C_MISC_STATUS`（0x150B，`CC_ATTACHED` / `SNK_SRC_MODE` /
     `CC_ORIENTATION`）自动决定角色；空闲时端口保持 **DRP**（try-sink ✓），
