@@ -1727,6 +1727,17 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   - Type-C 耳机枚举为 `AB13X USB Audio`（Bus 003 Device 002）✓，
     `snd-usb-audio` 绑定 ✓，`/proc/asound` 多出 card 1 ✓
   - PORTCS 从 `0000.0100`（只有 power）变成 **`0000.0103`（power|enable|connect）** ✓
+- **自动检测（`nabu-power` `024a7f5`、`3ec979f`，部分生效）**：
+  - 已实现：每 2 s 读 `TYPE_C_MISC_STATUS`（0x150B，`CC_ATTACHED` / `SNK_SRC_MODE` /
+    `CC_ORIENTATION`）自动决定角色；空闲时端口保持 **DRP**（try-sink ✓），
+    dwc3 留在 device（插电脑仍可用 ✓）；
+  - **已验证**：插充电器 → `attached=1 we_are_source=0` → 自动选 **device** ✓、充电不受影响 ✓；
+  - **未生效**：空闲 DRP 下**插设备（耳机/U盘）检测不到** ✗ —— `misc` 一直是 `0x02`
+    （attached=0 ✗），端口不供 5 V ⇒ sink 无电 ⇒ 拉不高 D+ ✗。手动 `nabu-typec host`
+    则完全正常 ✓（耳机枚举 + 声卡 ✓）。
+  - **下一步**：查 Type-C 状态机的 DRP/try-source 配置 —— `TYPE_C_MODE_CFG` 的
+    try-mode 时序、`TYPE_C_CURRSRC_CFG`(0x1552) 的 Rp 选择（`TYPEC_SRC_RP_SEL_MASK`）、
+    以及 `TYPE_C_DEBOUNCE_OPTION`。自动检测补齐之前，host 模式请用命令 ✓。
 - **用法（`nabu-power` `747e7a1`，已封装成命令）**：
   ```sh
   sudo nabu-typec host      # 主机模式：对外 5V，U盘/耳机/键盘可用（充电同时停止）
