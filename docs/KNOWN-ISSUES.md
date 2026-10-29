@@ -1739,7 +1739,14 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   - **host → device 时补跑 APSD（`355ce3e`）**：从 host 模式退出时，充电器**一直看到 VBUS 存在** ✗
     ⇒ 它的 plug 中断不触发 ✗ ⇒ 不做充电器分类 ✗ ⇒ “拔耳机后插充电器不被识别、要再插一次” ✗。
     现在在 host→device 切换时主动 `schedule status_change_work`（即重跑 APSD ✓）。
-    实测一次插拔序列（拔充电器 → 插耳机 → 拔耳机 → 插充电器）：
+  - **改用中断（`8dd2fd0`）**：轮询之外再加上 Type-C 的 `attach-detach`(0x15/0x05) 与
+    `cc-state-change`(0x15/0x02) 中断（DT 已挂到充电器节点 ✓，实测
+    `/proc/interrupts` 计数在增长 ✓），插拔一发生就立刻触发判定 ✓。
+    实测 `MODE_CFG = 0x10`（DRP + try-sink ✓ 我们写的值确实生效 ✓），
+    **DRP 轮转周期实测 2–4 秒**（之前目测 10 秒是采样混叠 ✗），
+    端到端识别约 **3–7 秒** ✓（之前 11 秒且需重插 ✗）。剩下那段是双角色口的物理轮转，
+    软件消不掉 ✓（Android 同样如此 ✓）。
+  - 实测一次插拔序列（拔充电器 → 插耳机 → 拔耳机 → 插充电器）：
     `role 2→1`（host ✓）→ `role 1→2`（回 device ✓）→ `attached=1 we_are_source=0` →
     `APSD: charger type DCP, input limit 3000000uA` ✓，端到端约 11 s
     （其中约 8 s 是 Type-C 双角色轮转的固有延迟 ✓）；
