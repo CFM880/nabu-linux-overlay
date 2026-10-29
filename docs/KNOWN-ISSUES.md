@@ -1755,6 +1755,12 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
     ⇒ sink 设备（耳机/U盘）永远检测不到 ✗。改成初值 `-1` 后立刻正常 ✓。
   - 调试工具：`typec_regs`（sysfs，打印 MODE_CFG/CURRSRC/DEBOUNCE/U_USB/状态等 ✓）
     就是靠它发现 `MODE_CFG = 0x02`（sink-only）✗ 才定位的 ✓。
+- **“一会充一会不充”（2026-10-29 15:40，已修 `26af39f`）**：DRP 轮转时端口偶尔把
+  **充电器误判成 sink** ✗ ⇒ 我们切 HOST 并**打开 OTG 5V 反向灌进充电器** ✗ ⇒ 充电中断 ✗
+  ⇒ 下一轮又切回，表现为充电状态来回跳 ✗。两道保险：
+  1. **只要充电器报 VBUS 存在就绝不切 host** ✓（sink 设备本身不供电，不会误伤 ✓）；
+  2. **host 判定需连续两次一致** ✓（过滤轮转毛刺 ✓）。
+  实测 90 秒：`online=1`、`status=Charging`、`role=auto` 全程恒定 ✓（94% 涓流 10–20 mA ✓）。
 - **旧的“部分生效”记录（保留）**：
   - 已实现：每 2 s 读 `TYPE_C_MISC_STATUS`（0x150B，`CC_ATTACHED` / `SNK_SRC_MODE` /
     `CC_ORIENTATION`）自动决定角色；空闲时端口保持 **DRP**（try-sink ✓），
