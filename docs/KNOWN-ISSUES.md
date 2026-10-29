@@ -1713,6 +1713,31 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
 - **实测**：修复前 `1.02 / 1.50 / 1.47 / 1.10 A` 来回跳 ✗；修复后 60 秒内稳定 **2.99 A**
   （≈12.6 W 进电池）✓✓。
 
+### 2.5.2 插着充电器却“不充电”（2026-10-29，已修 `nabu-power 9a15b9b`）
+- **现象**：充电器插着，`online=1`、`status=Charging`，但电池电流 −0.2 ~ −0.4 A ✗
+  （净放电）⇒ 用户看到“没充电”✓。
+- **根因（三个，全部对照 vendor 找到）**：
+  1. 驱动把 `TYPE_C_CFG`(0x1358) 的 `BC1P2_START_ON_CC`(bit7) **设成 1** ✗ ⇒ BC1.2/APSD
+     只在 **CC 检测到插入**时才启动 ✗；而本板 Type-C 块对充电器经常读不到 CC
+     （`MISC=0x22`，bit0=0 ✗）⇒ **APSD 一次都没跑**（`APSD_STATUS=0x00` ✗）⇒ 适配器
+     从未分类 ⇒ 输入上限停在 USB 默认 **500 mA** ✗。vendor（`qpnp-smb5.c:4139`）
+     明确把这一位**清零**，让检测只靠 VBUS 启动 ✓。
+  2. 写入 >500 mA 的 `USBIN_CURRENT_LIMIT` 时**没有切到软件 ICL 覆盖（HC 模式）** ✗
+     ⇒ 硬件继续按 APSD/USB 默认值限制 ✗。vendor 的 `smblib_set_icl_current()`
+     在 >500 mA 时会写 `ICL_OVERRIDE_AFTER_APSD` 并清 `CMD_ICL_OVERRIDE` ✓。
+  3. `USBIN_ADAPTER_ALLOW` 被设成 **5V-or-9V** ✗ ⇒ QC 充电器把 VBUS 拉到
+     **9.6–10.2 V** 并**跨重启保持** ✗；高压通路属于 LN8000 电荷泵（需要它自己的
+     调节环 ✓），只靠 SMB5 时输入上限反而塌到 **100 mA** ✗、电池继续放电 ✗。
+- **修复**：
+  - 清 `BC1P2_START_ON_CC` ✓（BC1.2 只靠 VBUS 启动 ✓）；
+  - `smb2_set_current_limit()` 在 >500 mA 时切 **HC 模式** ✓；
+  - `USBIN_ADAPTER_ALLOW` 改为 **5V only** ✓，并在 probe 时写 `CMD_HVDCP_2 = FORCE_5V`
+    把已经锁在高压的适配器拉回 5 V ✓；
+  - 充电器/PC 存在时端口保持 **DRP** ✓（钉成 SNK_ONLY 会让充电器以 500 mA 的 SDP 出现 ✗）；
+  - `typec_regs` 增加 APSD/ICL/充电状态寄存器转储，便于下次直接看 ✓。
+- **实测**：`APSD: charger type DCP, input limit 3000000uA` ✓、`VBUS 4.63 V`、
+  输入上限 1.45–1.5 A（AICL 收敛值）、电池 **+0.96 A** ✓、电量 90% → 91% ✓。
+
 ### 2.6.0 Type-C host 已打通（2026-10-28，手工切换）
 - **根因（两个，都在 `nabu-power` `ba7bf92` 修好）**：
   1. **Type-C 块基址错了** ✗：SMB5 的 Type-C 寄存器在 **0x1500**（`MODE_CFG`=0x1544，
