@@ -1727,7 +1727,21 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   - Type-C 耳机枚举为 `AB13X USB Audio`（Bus 003 Device 002）✓，
     `snd-usb-audio` 绑定 ✓，`/proc/asound` 多出 card 1 ✓
   - PORTCS 从 `0000.0100`（只有 power）变成 **`0000.0103`（power|enable|connect）** ✓
-- **自动检测（`nabu-power` `024a7f5`、`3ec979f`，部分生效）**：
+- **自动检测已完整工作（`nabu-power` `024a7f5`/`3ec979f`/`03ec52a`）**：
+  - 每 2 s 读 `TYPE_C_MISC_STATUS`（0x150B：`CC_ATTACHED` / `SNK_SRC_MODE` / `CC_ORIENTATION`）
+    自动决定角色；空闲时端口跑 **DRP（try-sink）**，dwc3 留在 device；
+  - **实机验证（2026-10-29 14:20，全程无命令）**：
+    | 插入 | 日志 | 结果 |
+    |---|---|---|
+    | Type-C 耳机 | `attached=1 we_are_source=1` → `role 2 -> 1` | PORT 5V **4.99 V** ✓、6 个 `usb 3-x` 节点 ✓、声卡 2 张 ✓ |
+    | 充电器 / PC | `attached=1 we_are_source=0` → `role 0 -> 2` | 保持 device ✓、充电不受影响 ✓ |
+  - 稳定：30 秒采样 `role=auto`、4.99 V 恒定、设备数不变、日志仅 3 次开机切换（无抖动 ✓）；
+  - **关键坑（`03ec52a`）**：模式缓存初值是 `0 == USB_ROLE_NONE` ✗，与“空闲模式”相同
+    ⇒ 第一次 DRP 写入被当成“没变化”跳过 ✗ ⇒ 端口一直停在 sink-only ✗、不供 5 V ✗
+    ⇒ sink 设备（耳机/U盘）永远检测不到 ✗。改成初值 `-1` 后立刻正常 ✓。
+  - 调试工具：`typec_regs`（sysfs，打印 MODE_CFG/CURRSRC/DEBOUNCE/U_USB/状态等 ✓）
+    就是靠它发现 `MODE_CFG = 0x02`（sink-only）✗ 才定位的 ✓。
+- **旧的“部分生效”记录（保留）**：
   - 已实现：每 2 s 读 `TYPE_C_MISC_STATUS`（0x150B，`CC_ATTACHED` / `SNK_SRC_MODE` /
     `CC_ORIENTATION`）自动决定角色；空闲时端口保持 **DRP**（try-sink ✓），
     dwc3 留在 device（插电脑仍可用 ✓）；
