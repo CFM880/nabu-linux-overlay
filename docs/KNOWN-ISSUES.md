@@ -1753,7 +1753,16 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
      或满 92% 就停 ✓，任何异常都退回 **5 V buck 充电** ✓。
 - **使能接口**：master 向 `ln8000-charger` 写 `PRESENT=1` ✓；驱动在该路径里做
   `init_device` + **SWITCHING（2:1）** ✓，绝不用 1:1 直通（那会把 9 V 直接加到电池 ✗）。
+- **PR #1 采纳的三条寄存器修复（2026-10-30，`nabu-power c2ac7fb`/`c849329`）**：
+  1. `USBIN_{HV,LV}_COLLAPSE_RESPONSE`（`USBIN_AICL_OPTIONS_CFG` bit1:0）是 **PMI8998 专有** ✗，
+     vendor 的 PM8150B 驱动从不设 ⇒ 一设 AICL 就卡 **250 mA** ✗。**5 V 输入电流从 1.4 A 提到 1.9–2.05 A** ✓；
+  2. `USBIN_ADAPTER_ALLOW = 5V_TO_9V(8)`（连续区间）✓：离散的 `5V_OR_9V(3)` 会让 PMIC 把
+     适配器的 **9.06 V 判成 USBIN_OV** ⇒ ICL 归 0 ✗（这就是 9 V 时灵时不灵的真因）✓；
+  3. `AICL_RERUN_TIME = 12 s`（vendor 值）✓，0 会让首次坏结果永久粘住 ✗。
+  另外初始化时**必须**用连续区间 ✓：只写 5 V 时 PMIC **不做 QC 握手** ✗ ⇒ QC3 适配器被当成普通 DCP ✗。
 - **实测**：
+  - 69–76%（恒流段）：**`VBUS 8.8–9.0 V`、ICL 3 A（不再被 OV 压）、电池 +3.9 A** ✓、
+    温度 30 °C ✓
   - 86–89%：自动起泵 ✓，`VBUS 9.73 V`、电池 **+1.85–1.91 A** ✓（CV 段）
   - 更低电量时抓到 **2.99 A** 峰值 ✓
   - ≥90%：不起泵 ✓，回到 5 V 充电（+1.37 A）✓
