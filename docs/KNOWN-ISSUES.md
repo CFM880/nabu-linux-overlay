@@ -1886,6 +1886,39 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
 - **实测**：`echo host` ⇒ `MODE=0x04 / OTG=0x01` 立即生效 ✓；`echo auto`（充电器插着）
   3 秒内回到 `MODE=0x10 / OTG=0x00 / online=1`，电池 **+1.0 A** ✓。
 
+### 2.6.4 Type-C 自动角色的最终形态（2026-10-30，已修 `nabu-power f5c3d9f`）
+历经几轮后，真正的根因按重要性排列（前两条是“设备掉线/充不上电”的主因）：
+
+1. **5V 升压有两个所有者** ✗：标准 `qcom_usb_vbus_regulator`（`usb_vbus`）和 charger 驱动里
+   私有的 `usb-otg-vbus` 操作同一组 DCDC 寄存器 ⇒ `usb_vbus` 的 `use_count=0` 但硬件是开的 ✗
+   ⇒ `regulator_late_cleanup()` 在开机 ~31 秒把它**关掉** ✗（`usb_vbus: disabling` +
+   `usb 3-1: USB disconnect`）⇒ 设备半分钟后掉线 ✗、且角色不变所以不会再打开 ✗。
+   **修复**：charger 驱动改为消费 DT 的 `usb-vbus-supply = <&pm8150b_vbus>` ✓，
+   不再注册第二个 regulator ✓；电流上限走 `regulator_set_current_limit(2A)` ✓
+   （DT 需要 `regulator-min/max-microamp`，否则报 `current operation not allowed` ✗）。
+2. **用缓存判断“是否在供电”** ✗：升压一开，VBUS 就是我们自己给的，`online` 立刻变 1 ✗
+   ⇒ 代码以为插了充电器 ⇒ 退回 device、关升压 ✗ ⇒ 自杀循环。**修复**：改用
+   `regulator_is_enabled(usb_vbus)` 判断 `sourcing` ✓。
+3. **host 保持分支提前 return** ✗：跳过了 apply ⇒ USB 角色再没下发给 dwc3 ✗
+   ⇒ 设备有 5V 但控制器停在 peripheral、无法枚举 ✗。**修复**：每次轮询都走到 apply，
+   把模式/升压/USB 角色三者一起对齐 ✓。
+4. **`MODE_CFG` 只按缓存写** ✗：Type-C 块在 attach 时会自己 latch 角色位 ✗ ⇒ 寄存器与缓存漂移 ✗。
+   **修复**：每次轮询读回寄存器，不一致就重写 ✓。
+5. **SRC_ONLY 下 CC 不上报 sink 拔出** ✗ ⇒ 拔耳机后要等 30 秒兜底 ✗。**修复**：供电期间
+   1 秒轮询 ✓（5 次确认后退出 ✓），空闲仍 30 秒 ✓。
+6. **`schedule_delayed_work()` 对已排队的 work 是空操作** ✗ ⇒ 中断里“立刻响应”经常无效 ✗。
+   **修复**：全部改 `mod_delayed_work()` ✓。
+
+**实测（`#239`）**：
+- 插充电器：`decide role=2(DEVICE) mode=0(DRP) online=1` ✓，`MODE=0x10/OTG=0x00`，
+  输入 3 A（AICL 实际 1.2–1.6 A），电池 **+1.2–1.4 A** ✓
+- 插耳机：`decide role=1(HOST) mode=1(SRC_ONLY) misc=0xcb` ✓，`usb 3-x=6`、声卡 2 张 ✓
+- 空口：`MODE=0x10 / OTG=0x00` ✓（不再空转供电 ✓）
+
+**已知限制**：在 host（供电）状态下插入充电器是**物理歧义**（两个 source 相遇，CC 无法判定 ✓），
+此时端口会继续保持 host；正确做法是先拔设备再插充电器（实测 1–3 秒切换 ✓）。要彻底支持
+“充电器+耳机同时”，需要 PD/TCPM 栈（当前未启用 ✓）。
+
 ### 2.7 `console=ttyGS0` 会让关机卡死（P0，已修 2026-10-27）
 - **现象**：`systemctl reboot` 后屏幕停在 "The system will reboot now"，机器不重启、
   不断电，只能长按电源键；journal 停在 `Reached target final.target`。
