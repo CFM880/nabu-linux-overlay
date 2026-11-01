@@ -47,7 +47,8 @@ Result on hardware: full 1600x2560 image, GNOME login, no DSI errors.
 | Charging (qcom_pmi8998/smb2 + LN8000) | 5 V charging at ~2.3 A with a DCP charger |
 | WiFi / SSH | works |
 | Fast charge | the pump correctly reports `adapter did not take 9V` for a non-QC charger; needs a QC3 adapter to verify |
-| iris decode, suspend/wake, sensors | not verified on this line yet |
+| iris decode (H.264/HEVC) | works: 4K H.264 uses 0.9 s CPU vs 18.5 s software, HEVC 1080p 0.47 s; iris IRQ counts confirm the VPU does the work. VA-API (`vpu_drv_video.so`) opens `/dev/video0` "Iris Decoder" and drives the same path |
+| suspend/wake, sensors | not verified on this line yet |
 
 ## Notes
 
