@@ -49,7 +49,7 @@ Result on hardware: full 1600x2560 image, GNOME login, no DSI errors.
 | Fast charge | the pump correctly reports `adapter did not take 9V` for a non-QC charger; needs a QC3 adapter to verify |
 | iris decode (H.264/HEVC) | works: 4K H.264 uses 0.9 s CPU vs 18.5 s software, HEVC 1080p 0.47 s; iris IRQ counts confirm the VPU does the work. VA-API (`vpu_drv_video.so`) opens `/dev/video0` "Iris Decoder" and drives the same path |
 | Sensors (SSC/SNOC via SLPI) | works: accelerator, gyro, magnetometer, ambient light; GNOME auto-rotates. Required adding the SLPI protection domains to the sm8150 table in qcom_pd_mapper (see below) |
-| suspend/wake | not verified on this line yet |
+| suspend/wake | **not working yet** - see below |
 
 ## Sensors
 
@@ -62,6 +62,27 @@ Adding `&slpi_root_pd` and `&slpi_sensor_pd` to `sm8150_domains[]`
 (`nabu-accelerometer/patches/0006-sm8150-slpi-pd-6.18.patch`) fixes it: no more
 SLPI crashes, all sensors report, and `net.hadess.SensorProxy` exposes
 `HasAccelerometer`/`AccelerometerOrientation`, so GNOME rotates the screen.
+
+## Suspend / wake (open)
+
+`systemctl suspend` reaches `PM: suspend-to-idle` with all devices suspended
+(`PM: suspend of devices complete after ~33 msecs`), and the display PLL fix
+below is required for that to work at all (without it the PLL never re-locks
+and the display clock tree is mangled).  The system is then woken ~2 ms later:
+
+    PM: suspend-to-idle
+    PM: Triggering wakeup from IRQ 118      <- pm8941_pwrkey (power key)
+    PM: resume from suspend-to-idle
+
+Disabling that IRQ's wakeup (`.../pwrkey/power/wakeup = disabled`) keeps the
+tablet suspended, so the power-key IRQ is the thing aborting it, not a device
+failing to suspend.  Disabling the USB keyboard, charger, battery and RTC
+wakeups made no difference, and changing the DT to `IRQ_TYPE_EDGE_FALLING`
+(only the press edge) did not either, so a latched release edge is not the
+cause.  The handler is a threaded `IRQF_ONESHOT` IRQ; the next step is to look
+at how the PON interrupt stays pending/active across
+`check_wakeup_irqs()`, and either clear the PON latch in
+`pm8941_pwrkey_suspend()` or take the interrupt off the threaded path.
 
 ## Notes
 
