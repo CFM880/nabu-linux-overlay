@@ -1,0 +1,59 @@
+# Port 6.18 — mainline 6.18.y for the Xiaomi Pad 5 (nabu)
+
+Target: upstream stable **Linux 6.18.y** (locked to `v6.18.59` in
+`nabu-main/repos.lock`), carried as module overlays, exactly like the 6.14 and
+7.2.7 lines. `make switch LINE=6.18` puts the kernel tree, every module and
+`repos.lock` on this line; each line builds in its own `out-<kernelversion>`.
+
+## Display (solved)
+
+The panel never lit up with the 6.18.59 display stack. Measurements on the
+tablet ruled out the pieces one by one: the DSI controller was programmed
+identically to 6.14 (`ctrl=0x173`, `cfg0=0x9130`, `act_h/act_v/total/hsync`
+bit-identical), the PHY PLL was running (`vco=1023989648`, `muxes=0xc0`,
+`pll_cntrl=0x1`) with the same byte clock (`146284235` Hz), the DPU streamed
+(vblank, both INTF timing engines on), and the panel answered DCS reads
+(`GET_POWER_MODE = 0x08`). What stayed black even with the DSI's own test
+pattern generator was the video link itself.
+
+The fix is to run the DSI stack of the tree that is known to drive this panel:
+pmOS' `sm8150/6.18` branch (**Linux 6.18.0**). `nabu-display` 6.18.y now ships
+those files verbatim as an overlay:
+
+```
+drivers/gpu/drm/msm/dsi/{dsi.c,dsi.h,dsi_cfg.c,dsi_cfg.h,dsi_host.c,dsi_manager.c}
+drivers/gpu/drm/msm/dsi/phy/{dsi_phy.c,dsi_phy.h,dsi_phy_7nm.c,...}
+drivers/gpu/drm/panel/panel-novatek-nt36523.c
+drivers/gpu/drm/drm_notifier.c, include/drm/drm_notifier.h, drivers/gpu/drm/Makefile
+```
+
+The DPU (and the adreno GPU) stay at 6.18.59: swapping 6.18.0's DPU/DP in as
+well pulls in APIs that the 6.18 stable updates removed
+(`msm_dp_is_yuv_420_enabled`, the `vsync_sel` signature) and is not needed —
+with the DSI overlay alone the panel shows a complete, correct image.
+
+A partial result was useful on the way: with the DSI overlay but the 6.18.59
+DPU, the left half of the panel lit up and the right half stayed black, which
+localised the problem to the DSI link rather than the DPU.
+
+Result on hardware: full 1600x2560 image, GNOME login, no DSI errors.
+
+## Other subsystems on this line
+
+| Area | State |
+|---|---|
+| Touch (NT36523 SPI) | works: firmware loads, `NVTCapacitiveTouchScreen` + pen |
+| Audio (WCD934x + CS35L41 + ADSP) | works: card 0 "Xiaomi Pad 5", speakers play |
+| Charging (qcom_pmi8998/smb2 + LN8000) | 5 V charging at ~2.3 A with a DCP charger |
+| WiFi / SSH | works |
+| Fast charge | the pump correctly reports `adapter did not take 9V` for a non-QC charger; needs a QC3 adapter to verify |
+| iris decode, suspend/wake, sensors | not verified on this line yet |
+
+## Notes
+
+- `make apply` copies overlays and now stamps them with the current time; the
+  module sources are older than the objects in `out-<version>`, and without the
+  timestamp refresh make linked stale objects (modpost failures, e.g.
+  `iris_set_gop_size_gen1 undefined`).
+- Keep the 6.14 UKI (`nabu-debian.efi`) on the ESP: a 6.18 experiment that
+  hangs is recovered by picking it in the rEFInd menu.
