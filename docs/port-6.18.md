@@ -48,7 +48,20 @@ Result on hardware: full 1600x2560 image, GNOME login, no DSI errors.
 | WiFi / SSH | works |
 | Fast charge | the pump correctly reports `adapter did not take 9V` for a non-QC charger; needs a QC3 adapter to verify |
 | iris decode (H.264/HEVC) | works: 4K H.264 uses 0.9 s CPU vs 18.5 s software, HEVC 1080p 0.47 s; iris IRQ counts confirm the VPU does the work. VA-API (`vpu_drv_video.so`) opens `/dev/video0` "Iris Decoder" and drives the same path |
-| suspend/wake, sensors | not verified on this line yet |
+| Sensors (SSC/SNOC via SLPI) | works: accelerator, gyro, magnetometer, ambient light; GNOME auto-rotates. Required adding the SLPI protection domains to the sm8150 table in qcom_pd_mapper (see below) |
+| suspend/wake | not verified on this line yet |
+
+## Sensors
+
+The SLPI kept crashing every ~40 s ("USER-PD DOG detects stalled
+initialization") and `ssccli` never received data.  `qcom_pd_mapper` advertises
+the SLPI domains for sdm845/sm8250/sm6115 but not for sm8150, although it is the
+same SLPI with instance 90, so `msm/slpi/root_pd` was never announced:
+fastrpc's PDR lookup failed with -ENXIO and the sensor PD could not attach.
+Adding `&slpi_root_pd` and `&slpi_sensor_pd` to `sm8150_domains[]`
+(`nabu-accelerometer/patches/0006-sm8150-slpi-pd-6.18.patch`) fixes it: no more
+SLPI crashes, all sensors report, and `net.hadess.SensorProxy` exposes
+`HasAccelerometer`/`AccelerometerOrientation`, so GNOME rotates the screen.
 
 ## Notes
 
