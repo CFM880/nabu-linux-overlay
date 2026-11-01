@@ -97,5 +97,11 @@ at how the PON interrupt stays pending/active across
   module sources are older than the objects in `out-<version>`, and without the
   timestamp refresh make linked stale objects (modpost failures, e.g.
   `iris_set_gop_size_gen1 undefined`).
+- Run `make config` **after** `make apply`: the touchscreen and LN8000
+  Kconfig entries live in the module overlays.  If the configuration is
+  generated while the tree still lacks them, the symbols silently disappear
+  from `.config` and the next `make deb-install` ships a kernel without the
+  touchscreen and charger modules (`lsmod` shows neither, no
+  `/sys/class/power_supply/ln8000-charger`).
 - Keep the 6.14 UKI (`nabu-debian.efi`) on the ESP: a 6.18 experiment that
   hangs is recovered by picking it in the rEFInd menu.
