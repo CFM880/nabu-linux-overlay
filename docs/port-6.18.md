@@ -76,7 +76,14 @@ and the display clock tree is mangled).  The system is then woken ~2 ms later:
 
 Disabling that IRQ's wakeup (`.../pwrkey/power/wakeup = disabled`) keeps the
 tablet suspended, so the power-key IRQ is the thing aborting it, not a device
-failing to suspend.  Disabling the USB keyboard, charger, battery and RTC
+failing to suspend.
+
+A diagnostic print in the handler shows the PMIC itself reporting a **press**
+at that moment (`irq sts=0x1 last=0`, then `sts=0x0` ~170 ms later) although
+nobody touches the tablet, so a real edge is generated during suspend entry,
+not a spurious interrupt from the driver.  Rewriting `PON_PULL_CTL` before
+arming the wakeup (on the theory that the PMIC drops the pull-up and the line
+floats low) did **not** help - that hypothesis is refuted too.  Disabling the USB keyboard, charger, battery and RTC
 wakeups made no difference, and changing the DT to `IRQ_TYPE_EDGE_FALLING`
 (only the press edge) did not either, so a latched release edge is not the
 cause.  The handler is a threaded `IRQF_ONESHOT` IRQ; the next step is to look
