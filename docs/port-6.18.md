@@ -63,33 +63,59 @@ Adding `&slpi_root_pd` and `&slpi_sensor_pd` to `sm8150_domains[]`
 SLPI crashes, all sensors report, and `net.hadess.SensorProxy` exposes
 `HasAccelerometer`/`AccelerometerOrientation`, so GNOME rotates the screen.
 
-## Suspend / wake (open)
+## Suspend / wake (solved, with a CPU idle-state workaround)
 
-`systemctl suspend` reaches `PM: suspend-to-idle` with all devices suspended
-(`PM: suspend of devices complete after ~33 msecs`), and the display PLL fix
-below is required for that to work at all (without it the PLL never re-locks
-and the display clock tree is mangled).  The system is then woken ~2 ms later:
+`systemctl suspend` (or `echo mem > /sys/power/state`) suspends all devices,
+the tablet stays asleep, and **one** press of the power key wakes it with the
+screen on.  Two PMIC problems had to be fixed in
+`nabu-platform/patches/0001-pwrkey-suspend-wake-6.18.patch`, enabled with
+`qcom,suspend-irq-mask-ms = <1000>` on `&pon_pwrkey`:
 
-    PM: suspend-to-idle
-    PM: Triggering wakeup from IRQ 118      <- pm8941_pwrkey (power key)
-    PM: resume from suspend-to-idle
+**1. The suspend-entry transient.**  A couple of milliseconds after
+`PM: suspend-to-idle` the PMIC asserts `PON_RT_STS` bit0 (KPDPWR) for ~180 ms
+although nobody touches the tablet, and with the IRQ armed as a wakeup source
+that aborts the suspend (`PM: Triggering wakeup from IRQ 118`, then
+`resume from suspend-to-idle`).  Measured identically on `6.14.11-nabu-full`,
+so it is the tablet, not a 6.18 regression.  `PON_DBC_CTL` reads back `0x8`
+(default 15.6 ms) even with `debounce = <250000>` in the DT, so the hardware
+debounce cannot filter it.  Leaving the IRQ unarmed (`IRQF_NO_SUSPEND` without
+`enable_irq_wake()`) keeps the system asleep but makes it unwakeable: once
+idle, the AP never receives the PMIC interrupt at all, so a real press does
+nothing.
 
-Disabling that IRQ's wakeup (`.../pwrkey/power/wakeup = disabled`) keeps the
-tablet suspended, so the power-key IRQ is the thing aborting it, not a device
-failing to suspend.
+The fix keeps the wakeup path armed and clears the PON interrupt enable in
+`pm8941_pwrkey_suspend()` (`PON_INT_EN_CLR`), so the transient never becomes
+an IRQ.  A 1 s timer reads `PON_RT_STS` (dropping any latch that appeared
+meanwhile) and sets `PON_INT_EN_SET` again.
 
-A diagnostic print in the handler shows the PMIC itself reporting a **press**
-at that moment (`irq sts=0x1 last=0`, then `sts=0x0` ~170 ms later) although
-nobody touches the tablet, so a real edge is generated during suspend entry,
-not a spurious interrupt from the driver.  Rewriting `PON_PULL_CTL` before
-arming the wakeup (on the theory that the PMIC drops the pull-up and the line
-floats low) did **not** help - that hypothesis is refuted too.  Disabling the USB keyboard, charger, battery and RTC
-wakeups made no difference, and changing the DT to `IRQ_TYPE_EDGE_FALLING`
-(only the press edge) did not either, so a latched release edge is not the
-cause.  The handler is a threaded `IRQF_ONESHOT` IRQ; the next step is to look
-at how the PON interrupt stays pending/active across
-`check_wakeup_irqs()`, and either clear the PON latch in
-`pm8941_pwrkey_suspend()` or take the interrupt off the threaded path.
+**2. The waking press reached userspace.**  It was reported as `KEY_POWER`, so
+logind suspended again ~1.7 s after the resume completed: the screen flashed
+and went dark, and a second press was needed.  The driver now consumes the
+press and its release while suspended and for 500 ms after resume.
+
+**CPU idle workaround.**  The 1 s unmask above needs kernel timers to run
+across s2idle, and so does every other timer-based wakeup.  With the PSCI
+`cpu-sleep-*` states (`local-timer-stop`, rail power collapse) enabled, a
+timer armed before suspend **never fires** (measured with the diagnostic
+`nabu_autowake` module parameter: the unmask print never appeared and the
+tablet could not be woken).  Removing `local-timer-stop` (the arch timer is
+*not* always-on here) hangs the boot, so those states are
+`status = "disabled"` in the overlay `sm8150.dtsi` and the CPUs stay in WFI.
+That costs idle power; the proper fix is to make the broadcast timer
+(currently `arch_mem_timer`) wake the CPU from those states.
+
+Verified on `6.18.59-nabu-full` (13 s of real sleep, one press wakes it, the
+screen stays on):
+
+    [198.674671] PM: suspend entry (s2idle)
+    [199.318236] PM: suspend-to-idle
+    [200.323397] ...pwrkey: key IRQ unmasked, RT_STS=0x4      <- +1s timer
+    [212.763566] PM: Triggering wakeup from IRQ 118           <- power key
+    [213.476425] PM: suspend exit
+
+and the diagnostic build showed the unmask timer firing across s2idle
+(`nabu: key IRQ unmasked` at +1.0 s) only once the CPU idle states were
+disabled.
 
 ## Notes
 
