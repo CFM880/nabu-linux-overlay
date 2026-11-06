@@ -93,16 +93,19 @@ logind suspended again ~1.7 s after the resume completed: the screen flashed
 and went dark, and a second press was needed.  The driver now consumes the
 press and its release while suspended and for 500 ms after resume.
 
-**CPU idle workaround.**  The 1 s unmask above needs kernel timers to run
-across s2idle, and so does every other timer-based wakeup.  With the PSCI
-`cpu-sleep-*` states (`local-timer-stop`, rail power collapse) enabled, a
-timer armed before suspend **never fires** (measured with the diagnostic
-`nabu_autowake` module parameter: the unmask print never appeared and the
-tablet could not be woken).  Removing `local-timer-stop` (the arch timer is
-*not* always-on here) hangs the boot, so those states are
-`status = "disabled"` in the overlay `sm8150.dtsi` and the CPUs stay in WFI.
-That costs idle power; the proper fix is to make the broadcast timer
-(currently `arch_mem_timer`) wake the CPU from those states.
+**CPU idle states and s2idle.**  The 1 s unmask above needs kernel timers to
+run across s2idle, and so does every other timer-based wakeup.  s2idle freezes
+the tick (`tick_freeze()`) and `cpuidle_enter_s2idle()` never calls
+`tick_broadcast_enter()`, so a PSCI state with `local-timer-stop` loses every
+timer armed before the suspend: the broadcast timer (`arch_mem_timer`) is
+never programmed.  Measured: with the `cpu-sleep-*` states usable for s2idle
+the unmask print never appeared and the tablet could not be woken.  Removing
+`local-timer-stop` hangs the boot (the arch timer really does stop), so the
+states carry `qcom,no-s2idle` and `cpuidle-psci` drops their `enter_s2idle`
+callback (`patches/0002-cpuidle-psci-s2idle-6.18.patch`).  Runtime idle still
+enters them (`cpu0/cpuidle/state1/usage` keeps growing) and s2idle stays in
+WFI.  Standby power is therefore higher than ideal until an always-on
+broadcast source is available for those states.
 
 Verified on `6.18.59-nabu-full` (13 s of real sleep, one press wakes it, the
 screen stays on):

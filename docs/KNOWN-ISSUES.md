@@ -28,7 +28,7 @@
 | P1 | s2idle resume 后**显示子系统**起不来（`disp_cc_pll0` 锁不上 → `mdss_runtime_resume` -110 → KMS 线程同步外部中止）→ **亮屏时**按电源键休眠后无法唤醒 → **已修（`nabu-display`：对 `core` 时钟持永久引用，PLL 不再解锁），待实机验证** | 待机可用性 | 2.4、`nabu-display` |
 | P1 | 睡前 hook `nabu-sensors-suspend.service` 用 `Before=suspend.target` 与挂起**并发**执行 → 整机卡死（连 RTC 也唤不回）→ **已修（改 `Before=sleep.target`），待实机验证** | 待机可用性 | 2.5、`nabu-accelerometer` |
 | P1 | 刷机后开机首个图形会话不自动旋转（登录页/用户会话都不转，注销重登才恢复）→ **已修复并实机验证**（2026-10-13：删 ttyGS0 getty、helper 不再提前置 ON、iio-sensor-proxy 启动竞态补丁） | 传感器/旋转可用性 | `nabu-accelerometer` `patches/0005`、`nabu-main/debian/build.sh`、`port-7.2.7.md` 2026-10-13 条 |
-| P1 | **6.18 s2idle 已可用**（休眠 + 电源键一次唤醒，实机验证 2026-11-06），但依赖 CPU 不进 `cpu-sleep-*` 掉电状态（`sm8150.dtsi` 中 `status = "disabled"`）→ 待机功耗偏高。根因：该状态下 broadcast timer（`arch_mem_timer`）唤不醒 CPU，挂起前武装的内核定时器永不触发（已实测）；去掉 `local-timer-stop` 会开机卡死 | 待机功耗 | `nabu-platform` `patches/0001`、`port-6.18.md` |
+| P1 | **6.18 s2idle 已可用**（休眠 + 电源键一次唤醒，实机验证 2026-11-06，连续 5 轮），但 s2idle 期间 CPU 只能停 WFI（`cpu-sleep-*` 标了 `qcom,no-s2idle`）→ **待机功耗偏高**。根因：s2idle 冻结 tick 且 `cpuidle_enter_s2idle()` 不调 `tick_broadcast_enter()`，带 `local-timer-stop` 的状态会丢掉挂起前武装的所有定时器（已实测），而 `arch_mem_timer` 也唤不醒该状态；去掉 `local-timer-stop` 会开机卡死。运行时 idle 不受影响（仍在用 rail 掉电状态） | 待机功耗 | `nabu-platform` `patches/0001`/`0002`、`port-6.18.md` |
 | P2 | 充电硬限制（电荷泵温度窗、仅 A 口 QC、无 PD/PPS、电池 profile 单一） | 充电体验 | `nabu-power/README.zh.md` |
 | P2 | 6.18 移植存在但未成为受支持配置 | 内核升级 | `linux-6.18/`、`repos.lock` |
 | P2 | 传感器仅导出桌面子集 → **陀螺仪/原始磁力计已导出（D-Bus）** | 功能覆盖 | `nabu-accelerometer/README.md`、7 |
