@@ -104,8 +104,21 @@ the unmask print never appeared and the tablet could not be woken.  Removing
 states carry `qcom,no-s2idle` and `cpuidle-psci` drops their `enter_s2idle`
 callback (`patches/0002-cpuidle-psci-s2idle-6.18.patch`).  Runtime idle still
 enters them (`cpu0/cpuidle/state1/usage` keeps growing) and s2idle stays in
-WFI.  Standby power is therefore higher than ideal until an always-on
-broadcast source is available for those states.
+WFI.
+
+**Trying to get "real" s2idle (rail collapse while suspended).**  A prototype
+added the missing `tick_broadcast_enter()`/`tick_broadcast_exit()` around the
+state entry in `enter_s2idle_proper()` (mirroring `cpuidle_enter_state()`) and
+removed `qcom,no-s2idle`.  The broadcast device was programmed, but the
+tablet never came back: `journalctl -k -b -1` of that boot ends at
+`PM: suspend entry (s2idle)` and the power key did not wake it (only a long
+press / hard reset did).  So on this platform neither the broadcast timer nor
+the PMIC IRQ can wake the CPU from the rail-collapse state during s2idle,
+even though runtime idle uses that same state and wakes on timers fine.  That
+makes full s2idle a platform/firmware problem (an always-on wake source, or
+PDC routing for the PMIC IRQ), not something a cpuidle patch can fix; the
+prototype was reverted.  Standby power is therefore higher than ideal on this
+port.
 
 Verified on `6.18.59-nabu-full` (13 s of real sleep, one press wakes it, the
 screen stays on):
