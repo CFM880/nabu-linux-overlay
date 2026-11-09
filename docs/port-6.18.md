@@ -109,16 +109,16 @@ WFI.
 **Trying to get "real" s2idle (rail collapse while suspended).**  A prototype
 added the missing `tick_broadcast_enter()`/`tick_broadcast_exit()` around the
 state entry in `enter_s2idle_proper()` (mirroring `cpuidle_enter_state()`) and
-removed `qcom,no-s2idle`.  The broadcast device was programmed, but the
-tablet never came back: `journalctl -k -b -1` of that boot ends at
-`PM: suspend entry (s2idle)` and the power key did not wake it (only a long
-press / hard reset did).  So on this platform neither the broadcast timer nor
-the PMIC IRQ can wake the CPU from the rail-collapse state during s2idle,
-even though runtime idle uses that same state and wakes on timers fine.  That
-makes full s2idle a platform/firmware problem (an always-on wake source, or
-PDC routing for the PMIC IRQ), not something a cpuidle patch can fix; the
-prototype was reverted.  Standby power is therefore higher than ideal on this
-port.
+removed `qcom,no-s2idle`.  The tablet never came back: `journalctl -k -b -1`
+of that boot ends at `PM: suspend entry (s2idle)` and the power key did not
+wake it (only a hard reset recovered it).  Two explanations remain open
+because there is no log from the hung boot: either the rail-collapse state
+itself cannot be woken in s2idle (the SPMI arbiter is already routed through
+PDC pin 1 for exactly this, so that would be a PDC/firmware issue), or the
+prototype hung while programming the broadcast after `tick_freeze()`.  The
+prototype was reverted; pursuing this needs a way to capture the hung boot
+(e.g. a persistent log) before it can be narrowed down.  Standby power is
+therefore higher than ideal on this port.
 
 Verified on `6.18.59-nabu-full` (13 s of real sleep, one press wakes it, the
 screen stays on):
