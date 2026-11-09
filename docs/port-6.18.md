@@ -59,7 +59,8 @@ the SLPI domains for sdm845/sm8250/sm6115 but not for sm8150, although it is the
 same SLPI with instance 90, so `msm/slpi/root_pd` was never announced:
 fastrpc's PDR lookup failed with -ENXIO and the sensor PD could not attach.
 Adding `&slpi_root_pd` and `&slpi_sensor_pd` to `sm8150_domains[]`
-(`nabu-accelerometer/patches/0006-sm8150-slpi-pd-6.18.patch`) fixes it: no more
+(overlay of `drivers/soc/qcom/qcom_pd_mapper.c` in
+`nabu-accelerometer/kernel-overlay/`) fixes it: no more
 SLPI crashes, all sensors report, and `net.hadess.SensorProxy` exposes
 `HasAccelerometer`/`AccelerometerOrientation`, so GNOME rotates the screen.
 
@@ -68,7 +69,8 @@ SLPI crashes, all sensors report, and `net.hadess.SensorProxy` exposes
 `systemctl suspend` (or `echo mem > /sys/power/state`) suspends all devices,
 the tablet stays asleep, and **one** press of the power key wakes it with the
 screen on.  Two PMIC problems had to be fixed in
-`nabu-platform/patches/0001-pwrkey-suspend-wake-6.18.patch`, enabled with
+carried as an overlay of `drivers/input/misc/pm8941-pwrkey.c`
+(`nabu-platform/kernel-overlay/`), enabled with
 `qcom,suspend-irq-mask-ms = <1000>` on `&pon_pwrkey`:
 
 **1. The suspend-entry transient.**  A couple of milliseconds after
@@ -102,7 +104,7 @@ never programmed.  Measured: with the `cpu-sleep-*` states usable for s2idle
 the unmask print never appeared and the tablet could not be woken.  Removing
 `local-timer-stop` hangs the boot (the arch timer really does stop), so the
 states carry `qcom,no-s2idle` and `cpuidle-psci` drops their `enter_s2idle`
-callback (`patches/0002-cpuidle-psci-s2idle-6.18.patch`).  Runtime idle still
+callback (overlay of `drivers/cpuidle/cpuidle-psci.c`).  Runtime idle still
 enters them (`cpu0/cpuidle/state1/usage` keeps growing) and s2idle stays in
 WFI.
 
