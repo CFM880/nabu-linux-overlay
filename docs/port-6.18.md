@@ -130,9 +130,29 @@ So the CPU cannot be woken out of the `cpu-sleep-*` rail-collapse state during
 s2idle on this port, by either the broadcast timer or the PMIC/PDC interrupt
 (the SPMI arbiter is already routed through PDC pin 1), even though runtime
 idle uses the same state and wakes fine (there another CPU handles timers).
-This is a platform/firmware problem, not a cpuidle or driver one.  Both
-prototypes were reverted; `qcom,no-s2idle` keeps s2idle in WFI, and standby
-power is therefore higher than ideal on this port.
+All prototypes were reverted; `qcom,no-s2idle` keeps s2idle in WFI, and
+standby power is therefore higher than ideal on this port.
+
+**How the vendor kernel does it, and how far a mainline port gets.**  The 4.14
+vendor kernel does not use s2idle at all: it uses `mem` deep suspend through
+Quadcom's LPM framework (`drivers/cpuidle/lpm-levels.c` +
+`drivers/soc/qcom/system_pm.c`).  For the cluster level marked
+`qcom,notify-rpm` (PSCI mode `0xC24`, "LLCC off, AOSS sleep") it reads the
+always-on arch timer compare value and writes it as the **PDC wakeup timer**
+through the RPMh CONTROL TCS, then `rpmh_flush()`es the sleep/wake votes, and
+only then calls PSCI `CPU_SUSPEND`, with the SPM/SAW already programmed by
+`cluster_prepare()`/`cpu_prepare()`.
+
+Mainline already has the CONTROL TCS write path
+(`rpmh_rsc_write_next_wakeup()`), but it deliberately writes `~0` during
+`SYSTEM_SUSPEND`, disabling timer wakeups.  A prototype changed it to write
+`CNTV_CVAL_EL0` and let s2idle use the `cpu-sleep-*` states again: the SDAM
+marker showed the write happened (0x32, "CONTROL TCS written") but the CPU was
+still not woken (the 1 s unmask timer never ran, no 0x02).  So the PDC timer
+write alone is not enough; the missing part is the rest of the vendor LPM
+path - the SPM/SAW low-vote and the RPMh sleep votes that put the AP/RSC into
+the state where that timer applies.  Mainline has no sm8150 SPM/SAW driver,
+so a real s2idle port is a multi-driver project, not a one-line fix.
 
 Verified on `6.18.59-nabu-full` (13 s of real sleep, one press wakes it, the
 screen stays on):
