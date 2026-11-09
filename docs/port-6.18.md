@@ -148,13 +148,34 @@ only then calls PSCI `CPU_SUSPEND`, with the SPM/SAW already programmed by
 Mainline already has the CONTROL TCS write path
 (`rpmh_rsc_write_next_wakeup()`), but it deliberately writes `~0` during
 `SYSTEM_SUSPEND`, disabling timer wakeups.  A prototype changed it to write
-`CNTV_CVAL_EL0` and let s2idle use the `cpu-sleep-*` states again: the SDAM
-marker showed the write happened (0x32, "CONTROL TCS written") but the CPU was
-still not woken (the 1 s unmask timer never ran, no 0x02).  So the PDC timer
-write alone is not enough; the missing part is the rest of the vendor LPM
-path - the SPM/SAW low-vote and the RPMh sleep votes that put the AP/RSC into
-the state where that timer applies.  Mainline has no sm8150 SPM/SAW driver,
-so a real s2idle port is a multi-driver project, not a one-line fix.
+`CNTV_CVAL_EL0` (and, in a second run, a fixed now+1s) and let s2idle use the
+`cpu-sleep-*` states again: the SDAM marker showed the write happened (0x32,
+"CONTROL TCS written", register layout verified identical to the vendor's
+`tcs_control_write()`) but the CPU was still not woken (the 1 s unmask timer
+never ran, no 0x02).  Note that the vendor does **not** use an SPM/SAW on
+sm8150 either (`cpu_prepare()` only calls `cpu_pm_enter()` and the DTS has no
+SAW nodes), so that was not the missing piece.
+
+**Platform `mem` suspend prototype.**  A driver registering `suspend_ops` for
+`mem` was then written to do what the vendor does: the PM core offlines the
+secondary CPUs, `cpu_pm_enter()` flushes the RPMh votes, and the last CPU
+calls `psci_cpu_suspend_enter(0x4100c244)` (the AOSS sleep state).  It does
+enter and leave that state and **the PMIC interrupt can wake it** - measured:
+the false ~180ms key press at entry woke it ~20ms after the PSCI call.  But
+that transient aborts every entry, and the `suspend_again()` retry cannot
+recover: the IRQ core disables the key IRQ when it reports the wake, and even
+after `resume_device_irqs()` plus re-arming it with `enable_irq_wake()` before
+each entry, the second PSCI entry never returns (SDAM marker 0x11) when a key
+is pressed later.  Keeping the IRQ non-armed (`IRQF_NO_SUSPEND` and waking via
+`pm_system_wakeup()`) is worse: the AOSS state cannot be woken at all.
+
+So on this port the deep state can be entered once and is woken by the
+immediate PMIC transient, but a re-entered deep state is not wake-capable in
+the mainline sequence; the vendor's Android suspend does not hit this because
+its PMIC/PDC state handling differs.  The `mem` prototype was dropped and the
+s2idle (WFI) configuration remains.  The SDAM black-box marker (PM8150
+`sdam@b100` byte 0x7e, read back through
+`/sys/bus/nvmem/devices/spmi_sdam1/nvmem`) was essential for all of this.
 
 Verified on `6.18.59-nabu-full` (13 s of real sleep, one press wakes it, the
 screen stays on):
