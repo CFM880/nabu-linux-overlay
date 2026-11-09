@@ -106,19 +106,33 @@ callback (`patches/0002-cpuidle-psci-s2idle-6.18.patch`).  Runtime idle still
 enters them (`cpu0/cpuidle/state1/usage` keeps growing) and s2idle stays in
 WFI.
 
-**Trying to get "real" s2idle (rail collapse while suspended).**  A prototype
-added the missing `tick_broadcast_enter()`/`tick_broadcast_exit()` around the
-state entry in `enter_s2idle_proper()` (mirroring `cpuidle_enter_state()`) and
-removed `qcom,no-s2idle`.  The tablet never came back: `journalctl -k -b -1`
-of that boot ends at `PM: suspend entry (s2idle)` and the power key did not
-wake it (only a hard reset recovered it).  Two explanations remain open
-because there is no log from the hung boot: either the rail-collapse state
-itself cannot be woken in s2idle (the SPMI arbiter is already routed through
-PDC pin 1 for exactly this, so that would be a PDC/firmware issue), or the
-prototype hung while programming the broadcast after `tick_freeze()`.  The
-prototype was reverted; pursuing this needs a way to capture the hung boot
-(e.g. a persistent log) before it can be narrowed down.  Standby power is
-therefore higher than ideal on this port.
+**Why "real" s2idle (rail collapse while suspended) does not work.**  Two
+prototypes were measured, using a black-box marker in a PM8150 SDAM byte
+(`sdam@b100`, offset 0x7e): it is PMIC-internal always-on RAM, so the last
+value written before a hang survives an AP reset and can be read back through
+`/sys/bus/nvmem/devices/spmi_sdam1/nvmem` after the hard reset.
+
+1. Adding the missing `tick_broadcast_enter()`/`tick_broadcast_exit()` around
+   the s2idle state entry (mirroring `cpuidle_enter_state()`) and removing
+   `qcom,no-s2idle`: the marker stopped at "broadcast entered, state being
+   entered" (0x13) and never advanced to "state returned" (0x14).  The 1 s
+   unmask timer also never ran (its mark 0x02 never appeared), so the state
+   was entered with the broadcast programmed and still no timer fired.
+
+2. To separate "timers do not work" from "nothing can wake this state", the
+   power key IRQ was kept enabled and non-armed (`IRQF_NO_SUSPEND` +
+   `enable_irq_wake()`, handler drops the entry transient and calls
+   `pm_system_wakeup()` on a real press).  The marker showed the transient
+   IRQ *was* delivered at suspend entry (0x21) but a press 20 s later never
+   produced an IRQ (no 0x22), and the tablet had to be hard-reset.
+
+So the CPU cannot be woken out of the `cpu-sleep-*` rail-collapse state during
+s2idle on this port, by either the broadcast timer or the PMIC/PDC interrupt
+(the SPMI arbiter is already routed through PDC pin 1), even though runtime
+idle uses the same state and wakes fine (there another CPU handles timers).
+This is a platform/firmware problem, not a cpuidle or driver one.  Both
+prototypes were reverted; `qcom,no-s2idle` keeps s2idle in WFI, and standby
+power is therefore higher than ideal on this port.
 
 Verified on `6.18.59-nabu-full` (13 s of real sleep, one press wakes it, the
 screen stays on):
