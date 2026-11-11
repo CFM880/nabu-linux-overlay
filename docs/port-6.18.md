@@ -49,7 +49,7 @@ Result on hardware: full 1600x2560 image, GNOME login, no DSI errors.
 | Fast charge | the pump correctly reports `adapter did not take 9V` for a non-QC charger; needs a QC3 adapter to verify |
 | iris decode (H.264/HEVC) | works: 4K H.264 uses 0.9 s CPU vs 18.5 s software, HEVC 1080p 0.47 s; iris IRQ counts confirm the VPU does the work. VA-API (`vpu_drv_video.so`) opens `/dev/video0` "Iris Decoder" and drives the same path |
 | Sensors (SSC/SNOC via SLPI) | works: accelerator, gyro, magnetometer, ambient light; GNOME auto-rotates. Required adding the SLPI protection domains to the sm8150 table in qcom_pd_mapper (see below) |
-| suspend/wake | **not working yet** - see below |
+| suspend/wake | works: s2idle and, since 2026-11-11, platform `mem` (AOSS deep sleep, power key wakes it) — see below |
 
 ## Sensors
 
@@ -64,7 +64,7 @@ Adding `&slpi_root_pd` and `&slpi_sensor_pd` to `sm8150_domains[]`
 SLPI crashes, all sensors report, and `net.hadess.SensorProxy` exposes
 `HasAccelerometer`/`AccelerometerOrientation`, so GNOME rotates the screen.
 
-## Suspend / wake (solved, with a CPU idle-state workaround)
+## Suspend / wake (solved: s2idle and platform `mem` deep sleep)
 
 `systemctl suspend` (or `echo mem > /sys/power/state`) suspends all devices,
 the tablet stays asleep, and **one** press of the power key wakes it with the
@@ -156,29 +156,73 @@ never ran, no 0x02).  Note that the vendor does **not** use an SPM/SAW on
 sm8150 either (`cpu_prepare()` only calls `cpu_pm_enter()` and the DTS has no
 SAW nodes), so that was not the missing piece.
 
-**Platform `mem` suspend prototype.**  A driver registering `suspend_ops` for
-`mem` was then written to do what the vendor does: the PM core offlines the
-secondary CPUs, `cpu_pm_enter()` flushes the RPMh votes, and the last CPU
-calls `psci_cpu_suspend_enter(0x4100c244)` (the AOSS sleep state).  It does
-enter and leave that state and **the PMIC interrupt can wake it** - measured:
-the false ~180ms key press at entry woke it ~20ms after the PSCI call.  But
-that transient aborts every entry, and the `suspend_again()` retry cannot
-recover: the IRQ core disables the key IRQ when it reports the wake, and even
-after `resume_device_irqs()` plus re-arming it with `enable_irq_wake()` before
-each entry, the second PSCI entry never returns (SDAM marker 0x11) when a key
-is pressed later.  Keeping the IRQ non-armed (`IRQF_NO_SUSPEND` and waking via
-`pm_system_wakeup()`) is worse: the AOSS state cannot be woken at all.
+**Platform `mem` suspend (AOSS deep sleep) — works since 2026-11-11.**  A
+driver registering `suspend_ops` for `mem` does what the vendor does: the PM
+core offlines the secondary CPUs (its `cpu_pm_suspend` syscore op flushes the
+RPMh sleep/wake votes), and the last CPU calls
+`psci_cpu_suspend_enter(0x4100c244)` — reset flag, affinity 1, cluster mode
+`0xC24` ("LLCC off, AOSS sleep"), CPU mode 4 ("rail power collapse"), i.e. the
+exact state the vendor's LPM DT computes.  Measured results on
+`6.18.59-nabu-full`: 60/60 `rtcwake` cycles resume cleanly, and the power key
+suspends the tablet and wakes it with the screen on (3/3 with 30 s sleeps).
 
-So on this port the deep state can be entered once and is woken by the
-immediate PMIC transient, but a re-entered deep state is not wake-capable in
-the mainline sequence; the vendor's Android suspend does not hit this because
-its PMIC/PDC state handling differs.  The `mem` prototype was dropped and the
-s2idle (WFI) configuration remains.  The SDAM black-box marker (PM8150
-`sdam@b100` byte 0x7e, read back through
-`/sys/bus/nvmem/devices/spmi_sdam1/nvmem`) was essential for all of this.
+Five things had to be right; each was measured, and the wrong variants are
+listed because they look plausible:
 
-Verified on `6.18.59-nabu-full` (13 s of real sleep, one press wakes it, the
-screen stays on):
+1. **Nothing but PSCI in `.enter()`.**  The SPMI arbiter and the PMIC are
+   already partly gated by then: a PMIC register access from that context can
+   stall the bus and hang the machine with interrupts off (the hang moves to
+   wherever the access is made).  The key interrupt is armed from
+   `pm8941_pwrkey_suspend()`/`suspend_noirq()` instead, where the bus is fine.
+2. **Acknowledge the entry transient inside a bounded window.**  A latched
+   PMIC event keeps the SPMI summary line asserted, and PSCI refuses to sleep
+   while an interrupt is pending — every attempt returns in ~5 ms.  The
+   platform entry enables interrupts for a moment before each attempt so the
+   chained flow acks the PMIC normally, but only during the first
+   `NABU_WINDOW_MS` (1.5 s).  Outside that window a pending event can only be
+   a real wake press, and handling it there would swallow it (the driver drops
+   events while suspended) and the tablet would sleep again with nothing left
+   to wake it.  That failure looked exactly like "press, flash, sleep, never
+   wakeable".
+3. **Do not write the PDC wakeup timer.**  The vendor programs it from the
+   arch timer compare value; on mainline the equivalent made every kernel
+   timer wake the SoC (repeated ~740 ms entries, suspend lasting only 1/7 of
+   the time).  Leaving mainline's `~0` (timer disabled) is what a
+   key/RTC-woken suspend wants.
+4. **Do not "restore" the PDC registers.**  The vendor's
+   `CONFIG_QTI_PDC_SAVE_RESTORE` saves the enable banks and writes them back,
+   which is harmless in their flow, but a software shadow of those banks does
+   not contain the bits set by firmware/other drivers: rewriting them disarmed
+   wake sources and produced deep sleeps that nothing could wake.  The PDC
+   keeps its configuration across the AOSS sleep on this SoC.
+5. **Deliver the wake press to userspace.**  `enable_irq_wake()` on the key
+   actually succeeds (it returns 0, the nested `irq_set_irq_wake()` on the
+   chained SPMI summary is a no-op because the PDC sets
+   `IRQCHIP_SKIP_SET_WAKE`), but `suspend_device_irqs()` disables the key
+   interrupt as a non-wakeup source *after* the driver armed it, and the
+   pending press is then handled before `pm8941_pwrkey_resume()` runs, while
+   the driver still has `suspended` set.  It is re-armed from
+   `suspend_noirq` (after the masking) and the flag is cleared from a syscore
+   resume callback (before interrupts are enabled), so logind sees the press
+   and wakes the display.
+
+The SDAM black-box marker (PM8150 `sdam@b100`, byte 0x7e plus a 16-byte ring
+at 0x60..0x6f, read back through
+`/sys/bus/nvmem/devices/spmi_sdam1/nvmem`) is what made this tractable: the
+kernel log of a failed suspend dies with the reset, the PMIC RAM does not.
+Note that writes to it must not happen from `.enter()` either (see 1).
+
+Verified for the `mem` path on `6.18.59-nabu-full` (60/60 `rtcwake`
+cycles resume cleanly; power-key suspend and wake with 30 s sleeps, 3/3):
+
+    [   46.134348] PM: suspend entry (deep)
+    [   46.207800] nabu: pwrkey wake arm ret=0 in .suspend
+    [   46.215269] nabu: pwrkey re-armed in noirq
+    ... (entry attempts during the transient window) ...
+    [   46.633294] PM: suspend exit
+
+Verified for s2idle on the same kernel (13 s of real sleep, one press wakes
+it, the screen stays on):
 
     [198.674671] PM: suspend entry (s2idle)
     [199.318236] PM: suspend-to-idle
