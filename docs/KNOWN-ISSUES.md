@@ -975,9 +975,21 @@ overlay 文件现与上游**逐字节相同** ✓。
   区域的 `persistent_ram` 头与字符串：写入完全正常（签名 `DBGC`，灌入 12000 行标记
   后 `start=size=0x10bb5b`）⇒ **地址和写入路径都没问题**；执行一次普通
   `systemctl reboot` 后，新启动的 header 从 `start=size=0x17b55` 重新开始，**12000
-  行旧标记一条不剩** ⇒ 复位确实重建了 DDR。诊断节点已移除。因此本机继续用 PM8150
-  SDAM（`sdam@b100`）做黑匣子；ramoops 节点保留在 `0x370000000`（无害，且若将来
-  启动链不再清 DDR 即可生效）。
+  行旧标记一条不剩** ⇒ 复位确实重建了 DDR。诊断节点已移除。
+  之后按社区建议又试了另外两条**持久存储**路径，同样失败 ✗：
+  - `efi_pstore`：ramoops 移除后它自动注册，但受控 panic 后
+    `/sys/firmware/efi/efivars` 里**没有任何 dump 变量** ⇒ 这块 UEFI 的变量存储
+    不跨断电保持 ⇒ 已用 `CONFIG_EFI_VARS_PSTORE_DEFAULT_DISABLE=y` 关掉；
+  - `pstore/blk` 写到空闲的 `oops` 分区（`sda16`，16MB 全 0、无 OS 使用）：
+    内置版在 `late_initcall()` 早于 UFS 分区扫描，`+failed to resolve ...: -2`，
+    改模块 + udev 规则后 `pstore_blk: attached /dev/sda16 (16777216)` 成功，但
+    **panic 后分区仍全 0** —— 因为 `vpanic()` 在 `kmsg_dump()` 之前就
+    `local_irq_disable()`，而 `psblk_generic_blk_write()` 在 `irqs_disabled()` 时
+    直接返回 `-EBUSY`；UFS 也没有 `panic_write`，非 best-effort 路径同样不可用。
+    实验已回退（ramoops/blk 后端都关闭，PSTORE 前端保留）。
+  **结论**：本机 pstore 无可用后端。要抓 panic 日志请用 **USB CDC-ACM 串口**
+  （`serial-debug` 产品，`console=ttyGS0`）；无输出的挂死继续用 PM8150 SDAM
+  （`sdam@b100`）做黑匣子。
 - 挂死发生在设备挂起阶段 ⇒ **任务已被冻结** ✗ ⇒ journald 写不了 ✗、
   USB 串口随设备挂起 ✗、面板也已挂起（屏幕全黑 ✗）⇒ **没有任何活通道** ✗。
 - `pm_test=devices` 可以"不真正睡眠"地复现 ✗，但挂死时同样失去所有通道 ✗。

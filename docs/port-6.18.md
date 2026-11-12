@@ -257,46 +257,81 @@ and the diagnostic build showed the unmask timer firing across s2idle
 (`nabu: key IRQ unmasked` at +1.0 s) only once the CPU idle states were
 disabled.
 
-## pstore / ramoops (not achievable on this platform)
+## pstore (no usable backend on this platform)
 
-`pstore` is fully configured and the backend loads, but no log can ever
-survive a reboot here:
+`pstore` itself is configured and the frontend works, but **no backend on this
+device can persist a log across a reset**. All three were tried on hardware:
 
-```
-printk: legacy console [ramoops-1] enabled
-pstore: Registered ramoops as persistent store backend
-ramoops: using 0x400000@0x370000000, ecc: 0
-```
+| Backend | Result |
+|---|---|
+| `ramoops` (DDR) | writes correctly, content gone after a reboot |
+| `efi_pstore` (UEFI variables) | registers, a panic leaves no dump variable behind |
+| `pstore/blk` (raw `oops` partition) | attaches, but the panic write is refused |
 
-Three moves were tried, each verified on hardware:
+### ramoops: the reset reinitialises DDR
 
-1. **Address.** The buffer originally sat at `0xb0000000`, inside the region
-   the loader uses for the image/initrd (`efi: INITRD=0xb1736a98`); then at
-   `0xb4000000`, which turned out to be a hole in the memory map (`/proc/iomem`:
-   System RAM ends at `b3ffffff`, resumes at `b4400000`); finally at
-   `0x370000000`, high DDR free of every firmware/boot-chain range
-   (kernel image at `0x2c7600000`, firmware block from `0x370e78000`).
-2. **Reset type.** A PMIC restart handler programmed the vendor warm-reset
-   registers (`qpnp_pon_reset_config()`: `PS_HOLD_RST_CTL` type `0x01`,
-   `PS_HOLD_RST_CTL2` bit 7) and `reboot_mode=warm` made PSCI use
-   `SYSTEM_RESET2`; an SDAM marker proved the handler ran, but the PON type was
-   back to `0x7` afterwards and pstore stayed empty. The experiment was
-   reverted.
-3. **Proof of where it fails.** A temporary debugfs node
-   (`/sys/kernel/debug/nabu-ramoops`, diagnostics only, since removed) mapped
-   the physical region and printed its `persistent_ram` header and strings.
-   With the buffer at `0x370000000` the ring was written normally
-   (`header=44424743...` = signature `DBGC`, `start=size=0x10bb5b` after
-   12000 `printk` marker lines), so the write path and the address are fine.
-   After a plain `systemctl reboot` the new boot's header started again at
-   `start=size=0x17b55` and **all 12000 previous marker lines were gone**.
+Address first: the node started at `0xb0000000`, inside the region the loader
+uses for the image/initrd (`efi: INITRD=0xb1736a98`); then at `0xb4000000`,
+which is a hole in the memory map (`/proc/iomem`: System RAM ends at
+`b3ffffff` and resumes at `b4400000`); finally at `0x370000000`, high DDR free
+of every firmware/boot-chain range (kernel image at `0x2c7600000`, firmware
+block from `0x370e78000`).
 
-So the reset reinitialises the DRAM (and rewrites the PMIC PON configuration),
-whatever reset path Linux takes, and nothing in DDR survives it. Android's
-"memory magic" for Reboot2Android must live in always-on SRAM (IMEM/SMEM), not
-in DRAM. Keep the SDAM black box (`sdam@b100`, see `KNOWN-ISSUES.md`) for
-crash forensics; the ramoops node stays at `0x370000000` because it is
-harmless and becomes useful the day the boot chain keeps DRAM.
+Reset type second: a PMIC restart handler programmed the vendor warm-reset
+registers (`qpnp_pon_reset_config()`: `PS_HOLD_RST_CTL` type `0x01`,
+`PS_HOLD_RST_CTL2` bit 7) and `reboot_mode=warm` made PSCI use
+`SYSTEM_RESET2`; an SDAM marker proved the handler ran, but the PON type was
+back to `0x7` afterwards and pstore stayed empty.
+
+Then the proof, from a temporary debugfs node (diagnostics only, since
+removed) that mapped the physical region and printed its `persistent_ram`
+header and strings. With the buffer at `0x370000000` the ring was written
+normally (`header=44424743...` = signature `DBGC`, `start=size=0x10bb5b` after
+12000 `printk` marker lines), so the write path and the address are fine.
+After a plain `systemctl reboot` the new boot's header started again at
+`start=size=0x17b55` and **all 12000 previous marker lines were gone**.
+
+The reset reinitialises the DRAM and rewrites the PMIC PON configuration
+whatever reset path Linux takes. Android's "memory magic" for Reboot2Android
+must live in always-on SRAM (IMEM/SMEM), not in DRAM.
+
+### efi_pstore: the variable store is volatile
+
+With ramoops gone, `efi_pstore` registered instead. A controlled panic left
+`/sys/fs/pstore` empty and **no `dump`-type EFI variable** in
+`/sys/firmware/efi/efivars` after the reboot, so this UEFI keeps its variables
+in RAM (or does not keep them at all).
+
+### pstore/blk: the panic path runs with interrupts off
+
+The spare `oops` partition (`sda16`, 16 MiB, all zeroes, unused by any OS) was
+the last hope, using `pstore_blk` with `best_effort=1` on `/dev/sda16`. Two
+obstacles had to be solved first:
+
+- built in, it probes from `late_initcall()` before the UFS partition scan and
+  gives up with `failed to resolve 'PARTUUID=...': -2`, so it was built as a
+  module and loaded from a udev rule that fires when the partition appears
+  (`pstore_blk: attached /dev/sda16 (16777216)`);
+- `efi_pstore` takes the backend first, so it is disabled
+  (`CONFIG_EFI_VARS_PSTORE_DEFAULT_DISABLE=y`).
+
+Even then the panic write cannot happen: `vpanic()` calls
+`local_irq_disable()` before `kmsg_dump()`, and the generic block write used by
+`best_effort` returns `-EBUSY` whenever `irqs_disabled()`. Measured: the panic
+rebooted the tablet and the `oops` partition was still all zeroes. UFS has no
+`panic_write`, so the non-best-effort path is not available either.
+
+### What to use instead
+
+- **USB CDC-ACM console**: the `serial-debug` product puts `console=ttyGS0` on
+  the command line; plug the tablet into a PC and the complete panic output
+  arrives on `/dev/ttyACM*`. This is the "serial cable" of this tablet.
+- **PMIC SDAM black box** (`sdam@b100`, see `KNOWN-ISSUES.md`) for hangs where
+  nothing is printed: a few hundred bytes of markers written from the PM
+  notifier and the pwrkey driver survive any reset.
+
+The `PSTORE` frontend and the config options stay (so `/sys/fs/pstore` exists if
+a future boot chain ever keeps RAM), but no backend is enabled.
 
 ## Notes
 
