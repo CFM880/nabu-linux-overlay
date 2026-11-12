@@ -31,6 +31,7 @@
 | P1 | **6.18 s2idle 已可用**（休眠 + 电源键一次唤醒，实机验证，连续 5 轮），但 s2idle 期间 CPU 只能停 WFI（`cpu-sleep-*` 标了 `qcom,no-s2idle`）→ 待机功耗偏高。**平台 `mem` 深睡已可用**（2026-11-11：进入 AOSS `0x4100c244`，电源键唤醒并亮屏，30 秒睡眠连续 3/3；`rtcwake` 连续 60/60 恢复干净），因此 `mem_sleep` 默认即为 `deep`。s2idle（`echo freeze`）仍可用。厂商 4.14 的 LPM 方式与主线差异、以及五个必要条件（`.enter()` 只做 PSCI、瞬变只在 1.5 s 窗口内 ack、不写 PDC 定时器、不回写 PDC 使能影子、唤醒按键要在 syscore resume 前解锁）见 `port-6.18.md` | 待机功耗 | `nabu-platform` overlay（`nabu-suspend.c`、pwrkey、cpuidle-psci）、`port-6.18.md` |
 | P2 | 充电硬限制（电荷泵温度窗、仅 A 口 QC、无 PD/PPS、电池 profile 单一） | 充电体验 | `nabu-power/README.zh.md` |
 | P2 | 6.18 移植存在但未成为受支持配置 | 内核升级 | `linux-6.18/`、`repos.lock` |
+| P2 | 深睡待机功耗 **约 1.16~1.25 %/h**（实测：3h27m 掉 4%、7h37m 连续挂起、30.8min 掉 <1%，两次之间无虚假唤醒）。已排除的因子：关 WiFi/蓝牙、停 `iio-sensor-proxy` 均无改善；`echo stop > remoteproc*` 停 modem 会让挂起/恢复挂死（不可用）。剩余疑点在 DSP 固件的 RPMh 资源投票与 DDR/LLCC 掉电深度（vendor 靠固件+QMI 自行降频，主线无对应握手），需要 vendor RPMh 资料才能继续 | 待机功耗（约 28 %/天） | `port-6.18.md`「Platform mem suspend」、实测日志 |
 | P2 | 传感器仅导出桌面子集 → **陀螺仪/原始磁力计已导出（D-Bus）** | 功能覆盖 | `nabu-accelerometer/README.md`、7 |
 | P2 | Fluster 能力边界（tiny/422/444/交错/>8192） | 硬解覆盖 | `fluster-full.md:86`、`nabu-iris/docs/fluster-debug.md` |
 
