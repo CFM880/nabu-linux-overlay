@@ -949,9 +949,13 @@ overlay 文件现与上游**逐字节相同** ✓。
 
 **已确认的取证限制（重要）**：
 
-- `pstore/ramoops` **不可用** ✗：配置与 DTS 都在（`ramoops@b0000000` 4MB ✓、
-  `printk: legacy console [ramoops-1] enabled` ✓），但受控 panic 后
-  `/sys/fs/pstore/` 仍为空 ✗ ⇒ **重启会清 DDR** ✓。
+- `pstore/ramoops` **不可用** ✗：配置与 DTS 都在（4MB、`printk: legacy
+  console [ramoops-1] enabled` ✓），但受控 panic 后 `/sys/fs/pstore/` 仍为空 ✗。
+  2026-11-12 追查：原地址 `0xb0000000` **确实落在启动镜像区域里**（EFI stub 报告
+  `INITRD=0xb1736a98`，rEFInd 把 34MB UKI 从 `0xb0000000` 起装载）⇒ 每次开机都被
+  覆盖；把 ramoops 移到 `0xb4000000`（已在 UKI 范围之上、仍保留 `no-map`）后
+  **panic + 自动重启仍然为空** ⇒ 根因是**重启时 XBL 重新初始化 DDR**，内容不保留，
+  换地址也无效。因此本机继续用 PM8150 SDAM（`sdam@b100`）做黑匣子。
 - 挂死发生在设备挂起阶段 ⇒ **任务已被冻结** ✗ ⇒ journald 写不了 ✗、
   USB 串口随设备挂起 ✗、面板也已挂起（屏幕全黑 ✗）⇒ **没有任何活通道** ✗。
 - `pm_test=devices` 可以"不真正睡眠"地复现 ✗，但挂死时同样失去所有通道 ✗。
