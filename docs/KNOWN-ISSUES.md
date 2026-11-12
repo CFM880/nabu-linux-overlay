@@ -955,7 +955,13 @@ overlay 文件现与上游**逐字节相同** ✓。
   `INITRD=0xb1736a98`，rEFInd 把 34MB UKI 从 `0xb0000000` 起装载）⇒ 每次开机都被
   覆盖；把 ramoops 移到 `0xb4000000`（已在 UKI 范围之上、仍保留 `no-map`）后
   **panic + 自动重启仍然为空** ⇒ 根因是**重启时 XBL 重新初始化 DDR**，内容不保留，
-  换地址也无效。因此本机继续用 PM8150 SDAM（`sdam@b100`）做黑匣子。
+  换地址也无效。又试了 **warm reset**：在 `qcom-pon` 的 restart handler 里按 vendor
+  `qpnp_pon_reset_config()` 的顺序写 `PS_HOLD_RST_CTL`(0x5a, type=0x01) 与
+  `PS_HOLD_RST_CTL2`(0x5b, bit7)，优先级 200 先于 `msm-poweroff`；用 SDAM 标记确认
+  **handler 确实执行了**（重启后 `0x7e = 0xa5`），但复位后 PON 类型又回到 `0x7`
+  （硬复位）、pstore 依旧为空 ⇒ **该平台的复位会重新初始化 PMIC 配置和 DRAM**，
+  从 Linux 侧无法保住 ramoops。实验代码已回退。因此本机继续用 PM8150 SDAM
+  （`sdam@b100`）做黑匣子。
 - 挂死发生在设备挂起阶段 ⇒ **任务已被冻结** ✗ ⇒ journald 写不了 ✗、
   USB 串口随设备挂起 ✗、面板也已挂起（屏幕全黑 ✗）⇒ **没有任何活通道** ✗。
 - `pm_test=devices` 可以"不真正睡眠"地复现 ✗，但挂死时同样失去所有通道 ✗。
