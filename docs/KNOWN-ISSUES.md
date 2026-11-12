@@ -960,8 +960,15 @@ overlay 文件现与上游**逐字节相同** ✓。
   `PS_HOLD_RST_CTL2`(0x5b, bit7)，优先级 200 先于 `msm-poweroff`；用 SDAM 标记确认
   **handler 确实执行了**（重启后 `0x7e = 0xa5`），但复位后 PON 类型又回到 `0x7`
   （硬复位）、pstore 依旧为空 ⇒ **该平台的复位会重新初始化 PMIC 配置和 DRAM**，
-  从 Linux 侧无法保住 ramoops。实验代码已回退。因此本机继续用 PM8150 SDAM
-  （`sdam@b100`）做黑匣子。
+  从 Linux 侧无法保住 ramoops。实验代码已回退。
+  2026-11-12 又定位到第二个错误：迁移后的 `0xb4000000` 其实是**内存空洞**
+  （`/proc/iomem`：System RAM 在 `b3ffffff` 结束、`b4400000` 重新开始），
+  ramoops 写进未映射空间当然永远为空；已改到 `0xb4400000`（真实 DRAM、仍在
+  启动镜像之上），并按社区清单核对 `ramoops` 参数（`mem_address`/`mem_size`/
+  `console_size` 均非 0、无 `PSTORE_ZONE_INIT_ON_MOUNT`、无地址冲突）——但
+  **panic + `reboot_mode=warm`（PSCI SYSTEM_RESET2）重启后 pstore 依然为空**，
+  再次印证本机复位会重建 DDR。dualboot 的"内存魔数"应存在 IMEM 之类常驻 SRAM，
+  而非 DDR。因此本机继续用 PM8150 SDAM（`sdam@b100`）做黑匣子。
 - 挂死发生在设备挂起阶段 ⇒ **任务已被冻结** ✗ ⇒ journald 写不了 ✗、
   USB 串口随设备挂起 ✗、面板也已挂起（屏幕全黑 ✗）⇒ **没有任何活通道** ✗。
 - `pm_test=devices` 可以"不真正睡眠"地复现 ✗，但挂死时同样失去所有通道 ✗。
