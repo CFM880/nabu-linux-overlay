@@ -968,7 +968,16 @@ overlay 文件现与上游**逐字节相同** ✓。
   `console_size` 均非 0、无 `PSTORE_ZONE_INIT_ON_MOUNT`、无地址冲突）——但
   **panic + `reboot_mode=warm`（PSCI SYSTEM_RESET2）重启后 pstore 依然为空**，
   再次印证本机复位会重建 DDR。dualboot 的"内存魔数"应存在 IMEM 之类常驻 SRAM，
-  而非 DDR。因此本机继续用 PM8150 SDAM（`sdam@b100`）做黑匣子。
+  而非 DDR。
+  **最终证据（2026-11-12）**：按社区建议把 ramoops 放到高位 DDR `0x370000000`
+  （内核镜像在 `0x2c7600000`、固件块从 `0x370e78000` 开始，中间是空闲 System RAM，
+  与 modem/adsp/gpu/cma 的预留段无交集），并临时加了一个 debugfs 节点直接读该物理
+  区域的 `persistent_ram` 头与字符串：写入完全正常（签名 `DBGC`，灌入 12000 行标记
+  后 `start=size=0x10bb5b`）⇒ **地址和写入路径都没问题**；执行一次普通
+  `systemctl reboot` 后，新启动的 header 从 `start=size=0x17b55` 重新开始，**12000
+  行旧标记一条不剩** ⇒ 复位确实重建了 DDR。诊断节点已移除。因此本机继续用 PM8150
+  SDAM（`sdam@b100`）做黑匣子；ramoops 节点保留在 `0x370000000`（无害，且若将来
+  启动链不再清 DDR 即可生效）。
 - 挂死发生在设备挂起阶段 ⇒ **任务已被冻结** ✗ ⇒ journald 写不了 ✗、
   USB 串口随设备挂起 ✗、面板也已挂起（屏幕全黑 ✗）⇒ **没有任何活通道** ✗。
 - `pm_test=devices` 可以"不真正睡眠"地复现 ✗，但挂死时同样失去所有通道 ✗。

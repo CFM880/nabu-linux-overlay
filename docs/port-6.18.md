@@ -257,6 +257,47 @@ and the diagnostic build showed the unmask timer firing across s2idle
 (`nabu: key IRQ unmasked` at +1.0 s) only once the CPU idle states were
 disabled.
 
+## pstore / ramoops (not achievable on this platform)
+
+`pstore` is fully configured and the backend loads, but no log can ever
+survive a reboot here:
+
+```
+printk: legacy console [ramoops-1] enabled
+pstore: Registered ramoops as persistent store backend
+ramoops: using 0x400000@0x370000000, ecc: 0
+```
+
+Three moves were tried, each verified on hardware:
+
+1. **Address.** The buffer originally sat at `0xb0000000`, inside the region
+   the loader uses for the image/initrd (`efi: INITRD=0xb1736a98`); then at
+   `0xb4000000`, which turned out to be a hole in the memory map (`/proc/iomem`:
+   System RAM ends at `b3ffffff`, resumes at `b4400000`); finally at
+   `0x370000000`, high DDR free of every firmware/boot-chain range
+   (kernel image at `0x2c7600000`, firmware block from `0x370e78000`).
+2. **Reset type.** A PMIC restart handler programmed the vendor warm-reset
+   registers (`qpnp_pon_reset_config()`: `PS_HOLD_RST_CTL` type `0x01`,
+   `PS_HOLD_RST_CTL2` bit 7) and `reboot_mode=warm` made PSCI use
+   `SYSTEM_RESET2`; an SDAM marker proved the handler ran, but the PON type was
+   back to `0x7` afterwards and pstore stayed empty. The experiment was
+   reverted.
+3. **Proof of where it fails.** A temporary debugfs node
+   (`/sys/kernel/debug/nabu-ramoops`, diagnostics only, since removed) mapped
+   the physical region and printed its `persistent_ram` header and strings.
+   With the buffer at `0x370000000` the ring was written normally
+   (`header=44424743...` = signature `DBGC`, `start=size=0x10bb5b` after
+   12000 `printk` marker lines), so the write path and the address are fine.
+   After a plain `systemctl reboot` the new boot's header started again at
+   `start=size=0x17b55` and **all 12000 previous marker lines were gone**.
+
+So the reset reinitialises the DRAM (and rewrites the PMIC PON configuration),
+whatever reset path Linux takes, and nothing in DDR survives it. Android's
+"memory magic" for Reboot2Android must live in always-on SRAM (IMEM/SMEM), not
+in DRAM. Keep the SDAM black box (`sdam@b100`, see `KNOWN-ISSUES.md`) for
+crash forensics; the ramoops node stays at `0x370000000` because it is
+harmless and becomes useful the day the boot chain keeps DRAM.
+
 ## Notes
 
 - `make apply` copies overlays and now stamps them with the current time; the
