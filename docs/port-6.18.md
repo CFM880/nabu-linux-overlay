@@ -44,7 +44,7 @@ Result on hardware: full 1600x2560 image, GNOME login, no DSI errors.
 |---|---|
 | Touch (NT36523 SPI) | works: firmware loads, `NVTCapacitiveTouchScreen` + pen |
 | Audio (WCD934x + CS35L41 + ADSP) | works: card 0 "Xiaomi Pad 5", speakers play |
-| Charging (qcom_pmi8998/smb2 + LN8000) | 5 V charging at ~2.3 A with a DCP charger |
+| Charging (qcom_pmi8998/smb2 + LN8000) | 5 V charging at ~2.3 A / 10 W into the pack with a DCP charger; the charge pump is opt-in (`cp_enable`) — see below |
 | WiFi / SSH | works |
 | Fast charge | the pump correctly reports `adapter did not take 9V` for a non-QC charger; needs a QC3 adapter to verify |
 | iris decode (H.264/HEVC) | works: 4K H.264 uses 0.9 s CPU vs 18.5 s software, HEVC 1080p 0.47 s; iris IRQ counts confirm the VPU does the work. VA-API (`vpu_drv_video.so`) opens `/dev/video0` "Iris Decoder" and drives the same path |
@@ -63,6 +63,29 @@ Adding `&slpi_root_pd` and `&slpi_sensor_pd` to `sm8150_domains[]`
 `nabu-accelerometer/kernel-overlay/`) fixes it: no more
 SLPI crashes, all sensors report, and `net.hadess.SensorProxy` exposes
 `HasAccelerometer`/`AccelerometerOrientation`, so GNOME rotates the screen.
+
+### Charging after suspend (fixed 2026-11-12)
+
+Plugging a plain DCP 5 V adapter after a day of suspend cycles left the tablet
+*discharging while reporting "Charging"*: `battery current -0.35 A`,
+`usb current_max 100 mA`.  The driver had auto-started the LN8000 charge pump
+(`cp_auto = true`), the adapter cannot provide the 9 V the 2:1 pump needs
+(`cp: adapter did not take 9V`), every failed attempt re-ran APSD, and the
+input limit stayed collapsed at the 100 mA USB default — less than the tablet
+consumes.  A reboot restored 3 A and +2.3 A charging, which is how the state
+machine was identified.
+
+Fixes in `nabu-power`/`qcom_pmi8998_charger.c`:
+
+- the charge pump no longer starts by itself (`cp_auto = false`); the existing
+  `cp_enable` attribute still allows it for adapters that do negotiate 9 V;
+- the 5 V fallback (`smb2_cp_restore_5v()`) re-applies the DCP input limit
+  (3 A) instead of leaving whatever the QC ramp left behind;
+- a resume callback re-runs the charger detection, because the state machine
+  did not survive repeated suspend cycles on its own.
+
+Verified on `6.18.59-nabu-full`: three suspend/resume cycles with the charger
+attached keep `current_max = 3 A` and +2.3…2.5 A into the pack (≈10 W).
 
 ## Suspend / wake (solved: s2idle and platform `mem` deep sleep)
 
