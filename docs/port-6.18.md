@@ -104,10 +104,18 @@ restores the Android behaviour:
 - it maps `LightLevel` through a fixed table, interpolated in log(lux):
   0 lux → 8 %, 20 → 38 %, 50 → 50 %, 300 → 72 %, 3000+ → 100 %;
 - it applies the result through `org.gnome.SettingsDaemon.Power.Screen`
-  `Brightness`, so the OSD, the slider and the persistence keep working, and
-  ramps at ~50 %/s from the level the panel actually shows;
+  `Brightness`, so the OSD, the slider and the persistence keep working;
+- the panel keeps its level while the light is changing and moves only once the
+  reading has been stable for 0.8 s, then linearly at 1 % per 40 ms (~25 %/s).
+  Chasing every sensor step looked like flicker; holding and then moving
+  quickly is what the eye reads as "it went to the right level";
+- differences below 2 % are ignored, so sensor noise around a curve knee no
+  longer steps the backlight (1 % = 20 raw on this panel) back and forth;
 - gsd's own ambient support is off (`ambient-enabled=false` in
-  `config/00-nabu-desktop`), otherwise the two fight.
+  `config/00-nabu-desktop`), otherwise the two fight.  That key is *user*
+  state: it was found switched back on in a live session and made the panel
+  fall from 74 % to 36 % while the daemon was ramping up, so the daemon now
+  forces it off at every start.
 
 Manual adjustment follows the Android rule: a change is taken as the user's
 intent only when it arrives while the session has recent input
@@ -118,20 +126,26 @@ backlight, our own echo - is undone: the daemon ramps back to the curve.  That
 matters on hardware: a stale value had left the panel at 13 % in a 27 lux room
 (43 % expected) and it was unreadable.
 
-Two rules keep the fade itself clean, both learned from a 10 Hz capture of the
-raw backlight:
+Four rules keep the move itself clean, all from 10 Hz captures of the
+backlight:
 
-- never read `Brightness` back during a fade.  gsd's value lags its own
+- never read `Brightness` back to start a move.  gsd's value lags its own
   notifications by tens of steps (75 % reported while the panel was at 82 %),
-  so taking it as the ramp start on every sensor event yanked the fade back and
-  produced visible up/down jumps on **both** brighten and dim;
-- external changes are polled every 2 s instead, only while no fade is running,
-  and the same unexpected value has to survive two checks.  Acting on gsd's
-  notifications directly was the other half of the jumping.
+  so taking it as the starting point on every sensor event yanked the move back
+  and produced visible up/down jumps on **both** brighten and dim;
+- write synchronously: back-to-back asynchronous sets make gsd apply an older
+  value after a newer one (the panel went 78 -> 79 -> 78 for writes 79, 78,
+  77);
+- external changes are polled every 2 s, and the same unexpected value has to
+  survive two checks.  Acting on gsd's notifications directly was another half
+  of the jumping;
+- the move is one percent per tick: gsd only accepts whole percent, and two at
+  once is a visible jump.
 
-After that the capture of a lamp on/off cycle is monotonic: 871 -> 1642 raw in
-1 % steps, then 1642 -> 831 with no reverse step, and an unexplained drop to
-12 % is back at the curve (40 %) within 5 s.
+Verified with a lamp on/off cycle: the panel holds while the light changes,
+then moves 1013 -> 1642 raw in a linear staircase; a slow dim lands in a few
+quick moves (79 -> 72 -> 64 -> 55 -> 45 -> 40); an unexplained drop to 12 % is
+back at the curve (40 %) within 5 s.
 
 `iio-sensor-proxy` allows `net.hadess.SensorProxy.claim-sensor` only for an
 *active* session, and a user service started with the graphical session is not
@@ -152,10 +166,10 @@ Two D-Bus details cost a round of debugging and are easy to get wrong again:
   connection.
 
 The daemon is event driven: `LightLevel` arrives as a `PropertiesChanged`
-signal and is applied immediately (~1 s including the iio-sensor-proxy filter
-and the ramp).  The 30 s timer is only a safety net - it re-claims the sensor
-(the resume hook restarts iio-sensor-proxy) and re-reads the current value,
-because an `on-change` sensor sends nothing while the light is steady.
+signal, arms the settle timer, and the move starts 0.8 s after the last event.
+The 30 s timer is only a safety net - it re-claims the sensor (the resume hook
+restarts iio-sensor-proxy) and re-reads the current value, because an
+`on-change` sensor sends nothing while the light is steady.
 
 Verified on the tablet: 23.59 lux → 40 % (the table gives exactly 40.0 %),
 applied through gsd (`Brightness=40`, backlight 831/2047) and reached with a
