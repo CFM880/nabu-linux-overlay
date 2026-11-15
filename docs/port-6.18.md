@@ -257,6 +257,73 @@ and the diagnostic build showed the unmask timer firing across s2idle
 (`nabu: key IRQ unmasked` at +1.0 s) only once the CPU idle states were
 disabled.
 
+## Standby power (open: ~1.5 %/h vs Android's 0.125 %/h)
+
+Deep sleep works, but the tablet still loses about **1.1-1.5 %/h** on battery
+where Android loses about **0.125 %/h** (the user measured 1 % over 8 h).  At
+8720 mAh that is ~100 mA versus Android's ~11 mA.
+
+### How it is measured
+
+`capacity` is the only usable gauge and it moves in 1 % steps (~87 mAh, i.e. a
+~50 minute step at 100 mA), so every configuration needs hours:
+
+```
+22:31 cap=96  ->  06:31 cap=84   (8 h, rtcwake -s 28800, sensors stopped)
+```
+
+The fuel gauge's coulomb-counted SOC would be 100x finer, but the SRAM words
+this chip needs are unreadable here - `BATT_SOC_v2` (word 455) comes back as
+`0xdb036ec0` and `capacity` therefore runs on the `BATT_MONOTONIC_SOC` fallback
+(`0x009`, ~0.4 % per LSB).  The `soc_raw` attribute added to read it was
+dropped again; it only ever returned garbage.
+
+### rtcwake bypasses the sensor quiesce
+
+`rtcwake` writes `/sys/power/state` directly, so `sleep.target` does not run and
+`nabu-sensors-suspend.service` (`nabu-sensors-sleep stop`) never stops
+`hexagonrpcd`.  With its FastRPC session live the SLPI crashes every 50-70 s:
+
+```
+PDM: service 'sensor_process' crash: 'EX:sensor_process:0x1:frpc_dsp:0x6d:PC=0xb206aabc'
+qcom_q6v5_pas 2400000.remoteproc: crash detected in slpi: type fatal error
+```
+
+Each crash/recovery aborts an in-flight suspend (the attempt "succeeds" after
+1.3 s) and wakes the SoC, which is what made the first overnight attempts look
+like hourly self-wakeups.  With `hexagonrpcd` stopped a 5 minute suspend sleeps
+the full 300 s and the crash counter stays put, so real suspends (which go
+through `sleep.target`) are already protected by the existing services.
+
+### What was ruled out
+
+| Experiment | Result |
+|---|---|
+| WiFi off, `ath10k` unloaded | no change |
+| `iio-sensor-proxy` stopped | no change |
+| `hexagonrpcd` + sensors stopped | 8 h: 96 % -> 84 % (1.5 %/h) |
+| lowest CPU OPP | no change |
+| **RPMh sleep votes (LPM)** | **worse**: 1.5 %/h vs 1.09 %/h, reverted |
+
+The RPMh experiment followed the vendor kernel: mainline
+`qcom-rpmh-regulator` never writes `RPMH_SLEEP_STATE`, and the vendor device
+tree asks for `RPMH_REGULATOR_MODE_LPM` on 24 LDOs.  Mirroring those votes into
+the sleep set (voltage + enable + LPM mode, written once from
+`PM_SUSPEND_PREPARE`) made standby *worse*, which means the bootloader's sleep
+set was already cheaper for these rails than "same voltage, LPM".  The change
+was reverted rather than carried.
+
+### What is left
+
+The vendor kernel additionally notifies the remote processors that the AP is
+suspending (`subsystem_put()` / APPS_SLEEP over QMI), and the modem WPSS - which
+has to stay up because the WCN3990 WLAN firmware is loaded through it - then
+enters its own low power state.  Mainline has no such notification, and the
+modem cannot be stopped at runtime ("Runtime 'stop' hard-hangs the SoC", see
+`nabu-start-modem.sh`), so it is the remaining suspect together with the DDR
+sleep votes of the interconnect (`icc-rpmh` only ever writes
+`RPMH_ACTIVE_ONLY_STATE` for the BCMs).
+
 ## pstore (no usable backend on this platform)
 
 `pstore` itself is configured and the frontend works, but **no backend on this
