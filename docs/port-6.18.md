@@ -295,6 +295,14 @@ like hourly self-wakeups.  With `hexagonrpcd` stopped a 5 minute suspend sleeps
 the full 300 s and the crash counter stays put, so real suspends (which go
 through `sleep.target`) are already protected by the existing services.
 
+The resume side needed a fix: the first attach right after resume can fail with
+`Unsupported handle: 4294967295` while the SLPI settles, and the daemon then
+exits, leaving the tablet without sensors (no auto-rotate) until the next boot.
+`nabu-sensors-sleep start` now retries the start until the unit stays active
+(`nabu-accelerometer` 7b6067b).  Note that a raw write to `/sys/power/state`
+(`rtcwake`) bypasses `sleep.target` entirely and still crashes the SLPI - use
+`rtcwake -m no -s N` plus `systemctl suspend` when measuring.
+
 ### What was ruled out
 
 | Experiment | Result |
