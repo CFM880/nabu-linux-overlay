@@ -118,6 +118,21 @@ backlight, our own echo - is undone: the daemon ramps back to the curve.  That
 matters on hardware: a stale value had left the panel at 13 % in a 27 lux room
 (43 % expected) and it was unreadable.
 
+Two rules keep the fade itself clean, both learned from a 10 Hz capture of the
+raw backlight:
+
+- never read `Brightness` back during a fade.  gsd's value lags its own
+  notifications by tens of steps (75 % reported while the panel was at 82 %),
+  so taking it as the ramp start on every sensor event yanked the fade back and
+  produced visible up/down jumps on **both** brighten and dim;
+- external changes are polled every 2 s instead, only while no fade is running,
+  and the same unexpected value has to survive two checks.  Acting on gsd's
+  notifications directly was the other half of the jumping.
+
+After that the capture of a lamp on/off cycle is monotonic: 871 -> 1642 raw in
+1 % steps, then 1642 -> 831 with no reverse step, and an unexplained drop to
+12 % is back at the curve (40 %) within 5 s.
+
 `iio-sensor-proxy` allows `net.hadess.SensorProxy.claim-sensor` only for an
 *active* session, and a user service started with the graphical session is not
 always one, so `config/50-nabu-autobrightness.rules` grants it.
