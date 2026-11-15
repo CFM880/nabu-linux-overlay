@@ -114,21 +114,30 @@ restores the Android behaviour:
 always one, so `config/50-nabu-autobrightness.rules` grants it.
 
 Two D-Bus details cost a round of debugging and are easy to get wrong again:
-the sensor service exports the values only under
-`org.freedesktop.DBus.Properties` (a proxy bound to `net.hadess.SensorProxy`
-has no `LightLevel` in its cache, so `g_dbus_proxy_get_cached_property()`
-returns `NULL`), and `ClaimLight` lives on `net.hadess.SensorProxy`, not on
-`Properties`.  The daemon therefore reads/writes with explicit
-`Properties.Get`/`Set` calls and claims through the service interface.
 
-The sensor is `stream-type: on-change` at 5 Hz: with constant light there are
-no events at all, so the daemon re-reads the current value on the 30 s timer
-instead of waiting for a change.
+- the proxies must be bound to the *service* interfaces
+  (`net.hadess.SensorProxy`, `org.gnome.SettingsDaemon.Power.Screen`).  GLib
+  only delivers `PropertiesChanged` when the interface named in the signal
+  matches the proxy's own interface, so a proxy created on
+  `org.freedesktop.DBus.Properties` silently drops **every** light event
+  (measured: brightness reacted 15 s late, and only when the 30 s re-read timer
+  happened to fire);
+- the values themselves are read and written through the standard
+  `org.freedesktop.DBus.Properties` `Get`/`Set`, which a proxy cannot address
+  (its calls always carry the proxy's interface), so those go through the
+  connection.
+
+The daemon is event driven: `LightLevel` arrives as a `PropertiesChanged`
+signal and is applied immediately (~1 s including the iio-sensor-proxy filter
+and the ramp).  The 30 s timer is only a safety net - it re-claims the sensor
+(the resume hook restarts iio-sensor-proxy) and re-reads the current value,
+because an `on-change` sensor sends nothing while the light is steady.
 
 Verified on the tablet: 23.59 lux → 40 % (the table gives exactly 40.0 %),
 applied through gsd (`Brightness=40`, backlight 831/2047) and reached with a
-visible ramp from the previous 53 %; the unit is `active`, the sensor is
-claimed and `HasAmbientLight` is true.
+visible ramp from the previous 53 %.  A cover/uncover cycle (3.3 lux → 1147 lux
+→ 24.5 lux) tracked the curve continuously and came back to 41 % / 831-851 for
+the same lux, which is the "return to the previous brightness" gsd never did.
 
 ## Suspend / wake (solved: s2idle and platform `mem` deep sleep)
 
