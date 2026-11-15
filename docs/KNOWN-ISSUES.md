@@ -2119,7 +2119,13 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   `scripts/verify.sh` 增加 `HasGyroscope`/`HasMagnetometer` 检查。
 - 依赖 SLPI 固件、`hexagonrpcd`、libssc、打过补丁的 iio-sensor-proxy 3.9；
   生产 UKI 与传感器配置强绑定。
-- 自动亮度滤波参数为经验值，会改变桌面 `LightLevel` 响应速度。
+- 自动亮度（2026-11-15）：GNOME 48 的“相对上次手动亮度”曲线会在明暗大幅变化后
+  漂移、回不到原亮度，已改用 `nabu-autobrightness` 固定 lux→背光表（见
+  `port-6.18.md`）。曲线拐点（0→8%、20→38%、50→50%、300→72%、3000→100%）为
+  经验值，仍可按观感微调。
+- 环境光传感器以 `stream-type: on-change`（标称 5 Hz）上报：光照稳定时没有事件，
+  守护进程靠 30 秒定时重读兜底，因此“遮住再放开”后若传感器未产生新事件，
+  亮度会等到下一次重读或事件才更新。
 
 ---
 

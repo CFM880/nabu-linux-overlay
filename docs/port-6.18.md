@@ -87,6 +87,49 @@ Fixes in `nabu-power`/`qcom_pmi8998_charger.c`:
 Verified on `6.18.59-nabu-full`: three suspend/resume cycles with the charger
 attached keep `current_max = 3 A` and +2.3…2.5 A into the pack (≈10 W).
 
+### Auto-brightness (fixed curve, 2026-11-15)
+
+GNOME 48 has no lux → backlight table.  Its ambient support scales the
+backlight *relative to the last manually chosen level*, so after a large swing
+the reference has moved: covering the sensor and uncovering it left the panel
+at a different (usually much lower) brightness, and normal indoor light sat far
+too dim.
+
+`nabu-accelerometer` now ships `nabu-autobrightness`, a small GIO daemon that
+restores the Android behaviour:
+
+- it claims the ambient light sensor (iio-sensor-proxy only opens it while a
+  client holds `ClaimLight`, which gsd used to do) and re-claims every 30 s,
+  because the sensor resume hook restarts the proxy after a suspend;
+- it maps `LightLevel` through a fixed table, interpolated in log(lux):
+  0 lux → 8 %, 20 → 38 %, 50 → 50 %, 300 → 72 %, 3000+ → 100 %;
+- it applies the result through `org.gnome.SettingsDaemon.Power.Screen`
+  `Brightness`, so the OSD, the slider and the persistence keep working, and
+  ramps at ~50 %/s from the level the panel actually shows;
+- gsd's own ambient support is off (`ambient-enabled=false` in
+  `config/00-nabu-desktop`), otherwise the two fight.
+
+`iio-sensor-proxy` allows `net.hadess.SensorProxy.claim-sensor` only for an
+*active* session, and a user service started with the graphical session is not
+always one, so `config/50-nabu-autobrightness.rules` grants it.
+
+Two D-Bus details cost a round of debugging and are easy to get wrong again:
+the sensor service exports the values only under
+`org.freedesktop.DBus.Properties` (a proxy bound to `net.hadess.SensorProxy`
+has no `LightLevel` in its cache, so `g_dbus_proxy_get_cached_property()`
+returns `NULL`), and `ClaimLight` lives on `net.hadess.SensorProxy`, not on
+`Properties`.  The daemon therefore reads/writes with explicit
+`Properties.Get`/`Set` calls and claims through the service interface.
+
+The sensor is `stream-type: on-change` at 5 Hz: with constant light there are
+no events at all, so the daemon re-reads the current value on the 30 s timer
+instead of waiting for a change.
+
+Verified on the tablet: 23.59 lux → 40 % (the table gives exactly 40.0 %),
+applied through gsd (`Brightness=40`, backlight 831/2047) and reached with a
+visible ramp from the previous 53 %; the unit is `active`, the sensor is
+claimed and `HasAmbientLight` is true.
+
 ## Suspend / wake (solved: s2idle and platform `mem` deep sleep)
 
 `systemctl suspend` (or `echo mem > /sys/power/state`) suspends all devices,
