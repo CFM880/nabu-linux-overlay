@@ -109,6 +109,15 @@ restores the Android behaviour:
 - gsd's own ambient support is off (`ambient-enabled=false` in
   `config/00-nabu-desktop`), otherwise the two fight.
 
+Manual adjustment follows the Android rule: a change is taken as the user's
+intent only when it arrives while the session has recent input
+(`org.gnome.Mutter.IdleMonitor` idle time under 2 s), and is then kept until the
+curve itself moves 5 points, i.e. until the ambient light really changed.
+Anything else - gsd restoring a stored value, another client poking the
+backlight, our own echo - is undone: the daemon ramps back to the curve.  That
+matters on hardware: a stale value had left the panel at 13 % in a 27 lux room
+(43 % expected) and it was unreadable.
+
 `iio-sensor-proxy` allows `net.hadess.SensorProxy.claim-sensor` only for an
 *active* session, and a user service started with the graphical session is not
 always one, so `config/50-nabu-autobrightness.rules` grants it.
