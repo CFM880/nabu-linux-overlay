@@ -332,6 +332,35 @@ modem cannot be stopped at runtime ("Runtime 'stop' hard-hangs the SoC", see
 sleep votes of the interconnect (`icc-rpmh` only ever writes
 `RPMH_ACTIVE_ONLY_STATE` for the BCMs).
 
+## Battery statistics
+
+`qcom_fg` now reports a coulomb-counted state of charge instead of the gauge's
+coarse register.  The PM8150B's own SOC words are unusable here - `BATT_SOC`
+(SRAM word 455) reads back as garbage (`0xdb036ec0`-style) even with the vendor
+profile loaded - so `capacity` used to come from `BATT_MONOTONIC_SOC`
+(`0x009`), about 0.4 % per LSB, with no `charge_now`/`energy_now` at all.
+
+The driver integrates the battery current every 30 s, seeded from the gauge at
+probe, and pulls the result back towards the monotonic SOC (1/8 of the
+difference when the battery rests, 1/32 under load).  Integration is skipped
+when the elapsed time is large, so a suspend is not charged with the
+post-resume current; the anchor covers that gap because the gauge keeps
+counting in hardware.
+
+New properties (all on the nominal 3.85 V, so `ENERGY_NOW` stays below
+`ENERGY_FULL`):
+
+| Property | Source |
+|---|---|
+| `charge_now` | integrated current, uAh |
+| `charge_full` | design capacity from the battery profile (8720 mAh) |
+| `energy_now` / `energy_full` | `charge_now` / `charge_full` x 3.85 V |
+| `health` | `Good` (no degradation model) |
+
+Verified: `charge_now` dropped 8074 uAh in 90 s while the gauge read
+330-385 mA (323 mA average), and `capacity` matched
+`charge_now / charge_full` (95 %, 8.27 / 8.72 Ah).
+
 ## pstore (no usable backend on this platform)
 
 `pstore` itself is configured and the frontend works, but **no backend on this
