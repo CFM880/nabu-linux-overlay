@@ -2128,10 +2128,9 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   固定曲线的实现经实测不随本移植发布（见 `port-6.18.md`：喂曲线值会被参考点缩放、
   反推参考点会漂移，绝对曲线需要额外的写者或修改 gsd）。
 
-- 启动早期约 20~24 秒面板无显示：控制台挂在引导器的 EFI framebuffer 上，
-  而面板驱动 `CONFIG_DRM_PANEL_NOVATEK_NT36523=m` 要等 udev 从 rootfs 加载，
-  UKI 又没有 initramfs。详见 `port-6.18.md`（Boot console 一节），可行的改进是
-  给 UKI 加 initramfs 做 early KMS；`=y` 试过一次导致黑屏+系统无响应，已回退。
+- 启动早期看不到日志的问题已修复（2026-11-16）：镜像流程用的 cmdline 是
+  `console=ttyGS0`（USB 串口），改成 `console=tty0 ignore_loglevel` 后屏幕从
+  0.43 秒起有输出，DRM 4.6 秒接管。引导器阶段与最初半秒仍只能用串口日志。
 
 ---
 

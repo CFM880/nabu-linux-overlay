@@ -38,43 +38,63 @@ localised the problem to the DSI link rather than the DPU.
 
 Result on hardware: full 1600x2560 image, GNOME login, no DSI errors.
 
-### Boot console: text appears only after ~24 s
+### Boot console (fixed 2026-11-16)
 
-`console=tty0` and `ignore_loglevel` are in the product cmdline and the console
-does come up immediately - on the **bootloader's** framebuffer:
-
-```
-13:04:49  Console: switching to colour frame buffer device 200x160
-13:04:49  fb0: EFI VGA frame buffer device
-13:05:13  Console: switching to colour dummy device
-13:05:13  msm_dpu: [drm] fb0: msmdrmfb frame buffer device
-```
-
-The panel itself stays black until the second line: the DSI is not scanning out
-the EFI framebuffer, and the DRM pipeline cannot finish probing because the
-panel driver is a module:
+Boot messages were invisible for the first ~24 s and the panel then jumped
+straight to the login.  The cause was not the display driver but the kernel
+command line the image flow baked into the UKI:
 
 ```
-CONFIG_DRM_MSM=y  CONFIG_DRM_MSM_DSI=y  CONFIG_BACKLIGHT_KTZ8866=y
-CONFIG_DRM_PANEL_NOVATEK_NT36523=m        <-- waits for userspace
+debian/config/debian.cmdline:  ... console=ttyGS0     <- console on the USB gadget
+config/production.cmdline:     ... console=tty0 ignore_loglevel
 ```
 
-and the UKI **carries no initramfs** (`ukify` runs without `--initrd`, the kernel
-mounts the rootfs directly), so the module is only loaded by udev after the rootfs
-is up - measured 24 s from kernel start.
+`make debian-img`/`debian-uki` use the former, so every flashed image sent its
+console to the serial gadget.  With `console=tty0 ignore_loglevel` the panel
+shows text from the first framebuffer switch:
 
-What was tried and rejected: building the panel in (`=y`) to probe during kernel
-init.  The resulting UKI booted to a black screen with an unresponsive system
-(SSH stalled although the network answered pings), and the cause was not
-isolated - a stale 6.14 minimal UKI was also present on the ESP at the time and
-may have been selected instead.  It was reverted to `=m` and the ESP reflashed;
-the boot works again.
+```
+[    0.43] Console: switching to colour frame buffer device 200x160   (EFI framebuffer)
+[    4.64] msm_dpu: [drm] fb0: msmdrmfb frame buffer device            (DRM takes over)
+```
 
-Remaining options if early text is wanted: (a) retry `=y` with the ESP cleaned
-and capture the probe log, (b) give the UKI a real initramfs
-(`update-initramfs` + `ukify --initrd`) with the panel module listed in
-`/etc/initramfs-tools/modules`, which is the standard early-KMS route and does
-not change how the driver is built.
+The panel driver stays a module (`CONFIG_DRM_PANEL_NOVATEK_NT36523=m`); the
+earlier attempt to build it in (`=y`) was reverted, and the ~24 s figure that
+was blamed on it came from the serial console plus a stale 6.14 UKI on the ESP.
+
+For the very first lines (bootloader and the first half second) the USB serial
+console is still the only option - the serial-debug product keeps
+`console=ttyGS0`.
+
+### Kernel release carries its content
+
+`nabu-main/scripts/nabu` appends a short hash of everything that shapes the
+kernel (module overlays, kernel fragments, module manifests) to the release, so
+a build is `6.18.59-nabu-full-<hash>`.  Two builds with the same inputs share
+`/lib/modules/<release>` and can be booted interchangeably; anything else gets
+its own module tree, which is what lets a rollback kernel in the ESP keep the
+modules it was built with.  The installed image keeps the previous release's
+tree (Debian-style parallel kernel packages), e.g.:
+
+```
+/lib/modules/6.18.59-nabu-full              (rollback kernel)
+/lib/modules/6.18.59-nabu-full-9881eaec     (current)
+```
+
+### CPU model in /proc/cpuinfo
+
+GNOME's About page reads the processor from `libgtop`, which only accepts
+`model name`, `cpu`, `Processor` or `Model Name` from `/proc/cpuinfo` - keys
+the arm64 kernel never prints, so the row stayed empty.  `nabu-platform` carries
+an overlay of `arch/arm64/kernel/cpuinfo.c` that adds, for `qcom,sm8150` only:
+
+```
+model name	: Qualcomm Snapdragon 860 (SM8150-AC)
+```
+
+(the same thing Qualcomm's downstream kernels do).  `lscpu` already decoded
+"Kryo-4XX-Gold" and the firmware SMBIOS already had the marketing name; only
+`/proc/cpuinfo` was missing it.
 
 ## Other subsystems on this line
 
