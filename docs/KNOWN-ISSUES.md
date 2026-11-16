@@ -2119,13 +2119,14 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   `scripts/verify.sh` 增加 `HasGyroscope`/`HasMagnetometer` 检查。
 - 依赖 SLPI 固件、`hexagonrpcd`、libssc、打过补丁的 iio-sensor-proxy 3.9；
   生产 UKI 与传感器配置强绑定。
-- 自动亮度（2026-11-15）：GNOME 48 的“相对上次手动亮度”曲线会在明暗大幅变化后
-  漂移、回不到原亮度，已改用 `nabu-autobrightness` 固定 lux→背光表（见
-  `port-6.18.md`）。曲线拐点（0→8%、20→38%、50→50%、300→72%、3000→100%）为
-  经验值，仍可按观感微调。
-- 守护进程订阅 `LightLevel` 的 `PropertiesChanged` 事件，光照变化后约 1 秒内
-  开始过渡；30 秒定时器只用于重新 claim 与兜底重读（`on-change` 传感器在光照
-  稳定时不发事件）。
+- 自动亮度使用 GNOME 自带实现（`ambient-enabled=true`），我们只暴露标准接口：
+  背光 `ktz8866-backlight`、环境光 `LightLevel`（单位 lux）、写入走 gsd 的
+  `Screen.Brightness`。
+- **已知限制**：gsd 没有 lux→亮度表，按“面板当前亮度”重设参考点
+  （`percent = 100·lux/A`），因此绝对亮度跟随上次手动值：明亮处校准后到暗处会偏暗
+  （实测 23.6 lux 仅 53%），手动调一次会整体缩放。这是 gsd 的设计，不是接口问题。
+  固定曲线的实现经实测不随本移植发布（见 `port-6.18.md`：喂曲线值会被参考点缩放、
+  反推参考点会漂移，绝对曲线需要额外的写者或修改 gsd）。
 
 ---
 

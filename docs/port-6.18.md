@@ -87,95 +87,49 @@ Fixes in `nabu-power`/`qcom_pmi8998_charger.c`:
 Verified on `6.18.59-nabu-full`: three suspend/resume cycles with the charger
 attached keep `current_max = 3 A` and +2.3…2.5 A into the pack (≈10 W).
 
-### Auto-brightness (fixed curve, 2026-11-15)
+### Auto-brightness (GNOME's own, standard interfaces)
 
-GNOME 48 has no lux → backlight table.  Its ambient support scales the
-backlight *relative to the last manually chosen level*, so after a large swing
-the reference has moved: covering the sensor and uncovering it left the panel
-at a different (usually much lower) brightness, and normal indoor light sat far
-too dim.
+The port does **not** ship its own brightness daemon.  The stack exposes the
+standard interfaces and the desktop decides:
 
-`nabu-accelerometer` now ships `nabu-autobrightness`, a small GIO daemon that
-restores the Android behaviour:
+- backlight: `ktz8866-backlight` (`brightness`, `max_brightness = 2047`,
+  linear scale) - no curve in the driver;
+- ambient light: `net.hadess.SensorProxy.LightLevel` in **lux** with the usual
+  claim/refcount semantics (iio-sensor-proxy, with the SSC backend patch that
+  only rejects sensor noise);
+- the only writer is gnome-settings-daemon, through
+  `org.gnome.SettingsDaemon.Power.Screen.Brightness`, so the OSD, the slider and
+  the persistence are the desktop's own.
 
-- it claims the ambient light sensor (iio-sensor-proxy only opens it while a
-  client holds `ClaimLight`, which gsd used to do) and re-claims every 30 s,
-  because the sensor resume hook restarts the proxy after a suspend;
-- it maps `LightLevel` through a fixed table, interpolated in log(lux):
-  0 lux → 8 %, 20 → 38 %, 50 → 50 %, 300 → 72 %, 3000+ → 100 %;
-- it applies the result through `org.gnome.SettingsDaemon.Power.Screen`
-  `Brightness`, so the OSD, the slider and the persistence keep working;
-- the panel keeps its level while the light is changing and moves only once the
-  reading has been stable for 0.8 s, then linearly at 1 % per 40 ms (~25 %/s).
-  Chasing every sensor step looked like flicker; holding and then moving
-  quickly is what the eye reads as "it went to the right level";
-- differences below 2 % are ignored, so sensor noise around a curve knee no
-  longer steps the backlight (1 % = 20 raw on this panel) back and forth;
-- gsd's own ambient support is off (`ambient-enabled=false` in
-  `config/00-nabu-desktop`), otherwise the two fight.  That key is *user*
-  state: it was found switched back on in a live session and made the panel
-  fall from 74 % to 36 % while the daemon was ramping up, so the daemon now
-  forces it off at every start.
+That is also what any laptop does, and it is why `ambient-enabled` is `true` in
+`config/00-nabu-desktop`: the "Automatic Screen Brightness" switch in Settings
+belongs to gsd, and it works.
 
-Manual adjustment follows the Android rule: a change is taken as the user's
-intent only when it arrives while the session has recent input
-(`org.gnome.Mutter.IdleMonitor` idle time under 2 s), and is then kept until the
-curve itself moves 5 points, i.e. until the ambient light really changed.
-Anything else - gsd restoring a stored value, another client poking the
-backlight, our own echo - is undone: the daemon ramps back to the curve.  That
-matters on hardware: a stale value had left the panel at 13 % in a 27 lux room
-(43 % expected) and it was unreadable.
+**Known limitation of that arrangement (measured on the tablet).** gsd's ambient
+support has no lux -> brightness table; it maps relative to a reference it
+re-derives from the brightness on screen:
 
-Four rules keep the move itself clean, all from 10 Hz captures of the
-backlight:
+```
+percent = 100 * LightLevel / A        A = 100 * LightLevel / percent_on_screen
+```
 
-- never read `Brightness` back to start a move.  gsd's value lags its own
-  notifications by tens of steps (75 % reported while the panel was at 82 %),
-  so taking it as the starting point on every sensor event yanked the move back
-  and produced visible up/down jumps on **both** brighten and dim;
-- write synchronously: back-to-back asynchronous sets make gsd apply an older
-  value after a newer one (the panel went 78 -> 79 -> 78 for writes 79, 78,
-  77);
-- external changes are polled every 2 s, and the same unexpected value has to
-  survive two checks.  Acting on gsd's notifications directly was another half
-  of the jumping;
-- the move is one percent per tick: gsd only accepts whole percent, and two at
-  once is a visible jump.
+so the absolute level follows the last manual brightness, and a reference taken
+in a bright room leaves the panel dim later on (23.6 lux at 53 % measured while
+the room called for more).  That is gsd's design, not an interface bug.
 
-Verified with a lamp on/off cycle: the panel holds while the light changes,
-then moves 1013 -> 1642 raw in a linear staircase; a slow dim lands in a few
-quick moves (79 -> 72 -> 64 -> 55 -> 45 -> 40); an unexplained drop to 12 % is
-back at the curve (40 %) within 5 s.
+A fixed lux -> backlight curve was implemented and evaluated on hardware and is
+deliberately **not shipped**:
 
-`iio-sensor-proxy` allows `net.hadess.SensorProxy.claim-sensor` only for an
-*active* session, and a user service started with the graphical session is not
-always one, so `config/50-nabu-autobrightness.rules` grants it.
-
-Two D-Bus details cost a round of debugging and are easy to get wrong again:
-
-- the proxies must be bound to the *service* interfaces
-  (`net.hadess.SensorProxy`, `org.gnome.SettingsDaemon.Power.Screen`).  GLib
-  only delivers `PropertiesChanged` when the interface named in the signal
-  matches the proxy's own interface, so a proxy created on
-  `org.freedesktop.DBus.Properties` silently drops **every** light event
-  (measured: brightness reacted 15 s late, and only when the 30 s re-read timer
-  happened to fire);
-- the values themselves are read and written through the standard
-  `org.freedesktop.DBus.Properties` `Get`/`Set`, which a proxy cannot address
-  (its calls always carry the proxy's interface), so those go through the
-  connection.
-
-The daemon is event driven: `LightLevel` arrives as a `PropertiesChanged`
-signal, arms the settle timer, and the move starts 0.8 s after the last event.
-The 30 s timer is only a safety net - it re-claims the sensor (the resume hook
-restarts iio-sensor-proxy) and re-reads the current value, because an
-`on-change` sensor sends nothing while the light is steady.
-
-Verified on the tablet: 23.59 lux → 40 % (the table gives exactly 40.0 %),
-applied through gsd (`Brightness=40`, backlight 831/2047) and reached with a
-visible ramp from the previous 53 %.  A cover/uncover cycle (3.3 lux → 1147 lux
-→ 24.5 lux) tracked the curve continuously and came back to 41 % / 831-851 for
-the same lux, which is the "return to the previous brightness" gsd never did.
+- feeding gsd the curve value instead of lux fixes the shape but the level is
+  still scaled by `A`: after a manual change to 30 % the whole curve shrank, and
+  the reference can wedge (6 % on screen while the curve wanted 60 %);
+- estimating `A` from the resulting backlight makes it exact in steady light
+  (69 % held for 60 s with no correction) but it wanders while the light drifts
+  (81 -> 72 -> 68 -> 59 -> 68) and stalls when the light keeps changing;
+- an absolute curve therefore needs a writer of its own (a user daemon) or a
+  patch inside gsd.  Neither is part of this port: the extra service was
+  rejected in review and a gsd patch would have to be carried against a distro
+  package.
 
 ## Suspend / wake (solved: s2idle and platform `mem` deep sleep)
 
