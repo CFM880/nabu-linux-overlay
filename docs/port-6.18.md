@@ -38,6 +38,44 @@ localised the problem to the DSI link rather than the DPU.
 
 Result on hardware: full 1600x2560 image, GNOME login, no DSI errors.
 
+### Boot console: text appears only after ~24 s
+
+`console=tty0` and `ignore_loglevel` are in the product cmdline and the console
+does come up immediately - on the **bootloader's** framebuffer:
+
+```
+13:04:49  Console: switching to colour frame buffer device 200x160
+13:04:49  fb0: EFI VGA frame buffer device
+13:05:13  Console: switching to colour dummy device
+13:05:13  msm_dpu: [drm] fb0: msmdrmfb frame buffer device
+```
+
+The panel itself stays black until the second line: the DSI is not scanning out
+the EFI framebuffer, and the DRM pipeline cannot finish probing because the
+panel driver is a module:
+
+```
+CONFIG_DRM_MSM=y  CONFIG_DRM_MSM_DSI=y  CONFIG_BACKLIGHT_KTZ8866=y
+CONFIG_DRM_PANEL_NOVATEK_NT36523=m        <-- waits for userspace
+```
+
+and the UKI **carries no initramfs** (`ukify` runs without `--initrd`, the kernel
+mounts the rootfs directly), so the module is only loaded by udev after the rootfs
+is up - measured 24 s from kernel start.
+
+What was tried and rejected: building the panel in (`=y`) to probe during kernel
+init.  The resulting UKI booted to a black screen with an unresponsive system
+(SSH stalled although the network answered pings), and the cause was not
+isolated - a stale 6.14 minimal UKI was also present on the ESP at the time and
+may have been selected instead.  It was reverted to `=m` and the ESP reflashed;
+the boot works again.
+
+Remaining options if early text is wanted: (a) retry `=y` with the ESP cleaned
+and capture the probe log, (b) give the UKI a real initramfs
+(`update-initramfs` + `ukify --initrd`) with the panel module listed in
+`/etc/initramfs-tools/modules`, which is the standard early-KMS route and does
+not change how the driver is built.
+
 ## Other subsystems on this line
 
 | Area | State |
