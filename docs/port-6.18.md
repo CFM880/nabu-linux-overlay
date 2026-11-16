@@ -66,9 +66,14 @@ For the very first lines (bootloader and the first half second) a serial console
 is still the only option.  The `serial-debug` product that carried it was
 removed on 2026-11-16 (the `nabu-serial` module stays available), and tracing
 now uses the `debug` product: production's modules and kernel config with
-`loglevel=8 initcall_debug no_console_suspend pm_debug_messages` on the command
-line, its own release, its own module tree and its own ESP entry, so the
-production entry stays bootable next to whatever is being traced.
+`console=tty0 console=ttyGS0 ignore_loglevel loglevel=8 initcall_debug
+no_console_suspend pm_debug_messages` on the command line, its own release, its
+own module tree and its own ESP entry, so the production entry stays bootable
+next to whatever is being traced.  With `CONFIG_U_SERIAL_CONSOLE=y` the gadget
+serial is a real printk console (`/proc/consoles` lists `ttyGS0`, kernel log says
+"console [ttyGS0] enabled", and `CON_PRINTBUFFER` replays the boot ring once the
+gadget enumerates), so the same log can be captured on a host with
+`screen /dev/ttyACM0 115200`.
 
 ### Kernel release carries its content
 
