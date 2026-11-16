@@ -62,9 +62,13 @@ The panel driver stays a module (`CONFIG_DRM_PANEL_NOVATEK_NT36523=m`); the
 earlier attempt to build it in (`=y`) was reverted, and the ~24 s figure that
 was blamed on it came from the serial console plus a stale 6.14 UKI on the ESP.
 
-For the very first lines (bootloader and the first half second) the USB serial
-console is still the only option - the serial-debug product keeps
-`console=ttyGS0`.
+For the very first lines (bootloader and the first half second) a serial console
+is still the only option.  The `serial-debug` product that carried it was
+removed on 2026-11-16 (the `nabu-serial` module stays available), and tracing
+now uses the `debug` product: production's modules and kernel config with
+`loglevel=8 initcall_debug no_console_suspend pm_debug_messages` on the command
+line, its own release, its own module tree and its own ESP entry, so the
+production entry stays bootable next to whatever is being traced.
 
 ### Kernel release carries its content
 
@@ -540,7 +544,8 @@ rebooted the tablet and the `oops` partition was still all zeroes. UFS has no
 
 ### What to use instead
 
-- **USB CDC-ACM console**: the `serial-debug` product puts `console=ttyGS0` on
+- **USB CDC-ACM console**: the `serial-debug` product (removed 2026-11-16; the
+  `nabu-serial` module remains) put `console=ttyGS0` on
   the command line; plug the tablet into a PC and the complete panic output
   arrives on `/dev/ttyACM*`. This is the "serial cable" of this tablet.
 - **PMIC SDAM black box** (`sdam@b100`, see `KNOWN-ISSUES.md`) for hangs where

@@ -340,7 +340,7 @@
 
 #### 2.4.1 2026-10-16 复现：真正的失败链（诊断内核 `no_console_suspend pm_debug_messages`）
 上面「PLL 常开」那一层是必要的，但它**不是** s2idle 失败的全部。让 console 在挂起期间不停后，
-`serial-debug` 产品上 `systemctl suspend` 的真实时间线（串口，`6.14.11-nabu-full`）：
+`serial-debug` 产品（2026-11-16 已移除，改用 `debug` 产品）上 `systemctl suspend` 的真实时间线（串口，`6.14.11-nabu-full`）：
 ```
  55.80  qcom-camss ac65000.camss: VFE reset timeout / Failed to power up pipeline: -5   (x4)
  56.24  PM: suspend entry (s2idle)
