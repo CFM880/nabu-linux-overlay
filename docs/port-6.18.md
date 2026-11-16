@@ -81,6 +81,17 @@ tree (Debian-style parallel kernel packages), e.g.:
 /lib/modules/6.18.59-nabu-full-9881eaec     (current)
 ```
 
+Both UKIs also carry their release in the embedded os-release, because rEFInd
+titles UKIs by it and two kernels on one ESP were indistinguishable.
+
+A rollback entry is only valid together with the module tree it was built with.
+The first attempt kept a pre-hash UKI (`#342`, release `6.18.59-nabu-full`) from
+an earlier image while that release's module tree had since been replaced by a
+later build: the kernel booted, but it hung on `PM: suspend entry (deep)` and
+never woke.  That entry was removed; with content-hashed releases the previous
+kernel now always keeps the exact modules it was built with, so the previous
+release (UKI + `/lib/modules/<release>`) is the entry to keep on the ESP.
+
 ### CPU model in /proc/cpuinfo
 
 GNOME's About page reads the processor from `libgtop`, which only accepts
