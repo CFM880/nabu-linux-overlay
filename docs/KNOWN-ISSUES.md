@@ -2117,6 +2117,12 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   `SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend/resume)` 只恢复电源、
   不重写 VFE/CSID 寄存器。属主线行为，非相机启用的回归；重新打开应用即
   恢复，内核级修复需要 camss 系统 PM 重编程 + 传感器恢复 streaming 位。
+- **相机"打不开/无法播放视频流"的恢复**：应用或 gst 管线被异常终止（崩溃、
+  timeout 杀进程）时，PipeWire 的 libcamera 节点不会停掉内核取流（fd 仍被
+  pipewire 持有，V4L2 无法自行停止），后续任何链路配置都会
+  `Failed to setup link ... 设备或资源忙`，表现为相机应用打不开。恢复：
+  `systemctl --user restart pipewire wireplumber`。根治需要在 PipeWire 的
+  libcamera SPA 节点上处理客户端消失时的停流（上游问题）。
 - 仍仅在 debug 产品启用；属于实验代码，替换 DTB 有无法启动风险。
 - 代码内未完成标记：`camss-vfe-17x.c:271`（`XXX 1 for PLAIN8?`）、
   `camss-vfe.c:275`（`TODO: Replace with pix formats`）。
