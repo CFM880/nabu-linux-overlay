@@ -69,7 +69,9 @@ script defaults to starting `plymouthd` unless `nosplash` or
 module, so there is no DRM device: the splash never appears and boot/reboot
 sits waiting for `plymouthd`.  `plymouth-start.service` has
 `ConditionKernelCommandLine=!plymouth.enable=0`, so the same switch also stops
-the systemd side.
+the systemd side.  Measured on the tablet: `/proc/cmdline` carries the switch,
+`plymouth-start.service` is `skipped, unmet condition check`, no `plymouthd`
+runs, and `plymouth-quit-wait.service` finishes in 0.02 s.
 
 For the very first lines (bootloader and the first half second) a serial console
 is still the only option.  The `serial-debug` product that carried it was
@@ -645,9 +647,13 @@ select; with that, `cam` on the front camera returns three consecutive
 
 Open:
 
-- the lens is not driven by libcamera yet (CN3927 VCM is registered and its
-  driver exposes `V4L2_CID_FOCUS_ABSOLUTE`; the simple pipeline handler has no
-  lens handling, so focus has to be set on the subdev for now);
+- the lens is not driven by libcamera yet.  The CN3927 VCM itself works:
+  `/dev/v4l-subdev25` exposes `focus_absolute` 0-1023 and a sweep, with the
+  subdev held open (`v4l2-ctl --sleep`), changes the centre-crop gradient of
+  the rear camera from 3.92 (focus 200) to 2.90 (focus 1023), so the actuator
+  moves.  The simple pipeline handler has no lens handling, so an application
+  has to open the lens subdev and set the control itself (`nabu-autofocus`
+  does exactly that);
 - the simple pipeline handler still drops the first frame while the CCM
   algorithm runs for the first time.
 
