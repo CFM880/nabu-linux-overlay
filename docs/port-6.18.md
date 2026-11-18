@@ -587,13 +587,30 @@ fail and the camera deliver no frames at all.
 
 Open on the kernel side:
 
-- only the first frame of a capture carries data; the rest arrive as zeroed
-  buffers.  The VFE writes the per-frame buffer address with
-  `vfe_wm_update()` (`VFE_BUS_WM_IMAGE_ADDR`), which reads back 0, so the data
-  keeps landing in the first buffer.  Instrumentation is in the overlay (removed
-  again once understood);
-- the front sensor (ov8856) configures (3272x2464) but delivers no frames;
+- **only the first frame of a capture carries data**; the rest arrive as zeroed
+  buffers (RGB 0, alpha 255 - the "25 % non-zero" that a byte count shows).
+  What the experiments established:
+
+  | Check | Result |
+  |---|---|
+  | driver-side addresses | `vfe_wm_update()` runs per frame and alternates between the two 16 MB buffers (`0xfd000000`/`0xfe000000`/`0xff000000`), so the addresses are right |
+  | high 32 bits (`IMAGE_ADDR_OFFSET`, never written upstream) | 0 - the buffers are below 4 GB, so truncation is *not* the cause |
+  | re-writing `WM_CFG` per frame (Qualcomm's bus ver2 does this) | no change |
+  | `FRAME_INC = 0` instead of `stride * height` | worse: even the first frame stays black, so `FRAME_INC` is what the WM uses to size a frame |
+
+  So the hardware keeps writing to the first programmed address.  The next step
+  is the vendor model: `cam_vfe_bus_ver2` submits the WM registers through the
+  CDM inside each request, and its address handling is a queue of
+  `irq_subsample_period + 1` entries (0 by default, so one per frame here).
+  Compare that latching with mainline's direct `reg_update`, or try the VFE lite
+  output path instead of the full VFE.
+- the front sensor (ov8856) configures (3272x2464) but delivers no frames and
+  stops after two WM updates;
 - the lens is not driven yet (CN3927 VCM is registered, focus is soft).
+
+Until the WM issue is understood the camera is usable for **single-frame**
+captures only (restart the stream per shot); it ships in the `debug` product
+only.
 
 ## Notes
 
