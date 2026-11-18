@@ -2090,14 +2090,27 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
 
 ---
 
-## 6. 相机（P1）
+## 6. 相机（P1，前后摄 2026-11-18 可用）
 
-- **GNOME Snapshot 50.0 补丁与安装器已移除**（`nabu-camera` `40a5620`），
-  现在仅有 `camera-app/nabu-autofocus` 原型，无通用拍照/录像集成。
-- 只有 libcamera simple IPA 调校文件，**无完整 3A/ISP 调优**；对焦为用户态
-  Tenengrad 扫描 + CN3927 VCM。
-- 前摄 OV8856 无自动对焦（CN3927 仅后摄）。
-- 属于实验代码，替换 DTB 有无法启动风险。
+- **前后摄均可用**：后摄 OV13B10（4208×3120，多帧连续出流、4160×2340）、
+  前摄 OV8856（3280×2464）。当年阻塞项的根因与证据见
+  `docs/port-6.18.md` 相机一节：黑帧是调校文件缺 `Lut`（gamma 表全 0），
+  前摄无帧是 CSIPHY id 全 0 导致 CSID 从 PHY0 取数。
+- **颜色**：发行版 libcamera 0.4 无 `Ccm`。`nabu-camera/scripts` 可交叉构建
+  0.5.2（含 GStreamer 插件）装到 `/usr/local` 并整体回退；但 **GNOME Snapshot
+  走 PipeWire → 系统 0.4**，不经过 0.5.2，所以内置应用颜色未校准，且
+  PipeWire 节点只枚举到 4096×2160（无传感器原生 4:3）。
+- **自动对焦**：`nabu-camera/patches/libcamera-0.5-simple-autofocus.patch` 在
+  simple pipeline 中接入镜头并实现对比度扫描（`AfMode`，默认 Continuous），
+  实测锁定 253（score 74）；前摄无 VCM。`camera-app/nabu-autofocus`
+  原型保留用于手动/测试场景。
+- **休眠交互**：挂起/唤醒本身正常（`PM: suspend entry/exit`，无内核报错，
+  唤醒后重新取流、AF 重新锁定均通过）；但**挂起时正在出流的流会在唤醒后
+  停帧**——ov13b10 仅 runtime PM，resume 后停在 standby；camss 的
+  `SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend/resume)` 只恢复电源、
+  不重写 VFE/CSID 寄存器。属主线行为，非相机启用的回归；重新打开应用即
+  恢复，内核级修复需要 camss 系统 PM 重编程 + 传感器恢复 streaming 位。
+- 仍仅在 debug 产品启用；属于实验代码，替换 DTB 有无法启动风险。
 - 代码内未完成标记：`camss-vfe-17x.c:271`（`XXX 1 for PLAIN8?`）、
   `camss-vfe.c:275`（`TODO: Replace with pix formats`）。
 

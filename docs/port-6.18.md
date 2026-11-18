@@ -682,6 +682,17 @@ Open:
 
 The camera ships in the `debug` product only.
 
+Suspend/resume with the camera stack loaded is verified (2026-11-18): a
+`rtcwake -m mem` cycle completes cleanly (`PM: suspend entry (deep)` /
+`resume of devices complete after 431 ms` / `PM: suspend exit`), there are no
+camss/sensor errors in dmesg, and after the wake a fresh capture locks focus
+again (253, score 96).  One inherent limitation: a stream that is *active*
+during suspend stops delivering frames after the resume - the sensor's
+runtime-only PM leaves it in standby and camss' system-sleep ops restore power
+but not the VFE/CSID register programming.  Closing and reopening the camera
+recovers; a kernel fix would need camss system-PM reprogramming plus
+re-starting the sensor's streaming bit.
+
 ## Notes
 
 - `make apply` copies overlays and now stamps them with the current time; the
