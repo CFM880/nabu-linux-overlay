@@ -606,6 +606,21 @@ permutation.  Measured on a neutral wall: no Ccm 168.4/167.8/167.8, with Ccm
 column swap is correct (the flipped function delivers physically R/B-swapped
 samples); only the field swap had to go.
 
+2026-11-18, second update: the AWB now uses a per-CCT colour gain table
+(`patches/libcamera-0.5-simple-awb-colourgains.patch`, libipa's `AwbGrey`
+machinery): the grey-world estimate only picks the colour temperature and the
+applied gains come from the tuning file.  Anchors measured on the tablet
+(rear R 1.77/B 1.51 at 5470 K, front R 1.64/B 1.36 at 6040 K; warm/cool ends
+extrapolated).  Verified: `AWB colour gain table in use`, and the applied
+gains match the table interpolation exactly (1.816/1.471 at 6182 K).
+
+One inherent limit, measured: a face-dominated frame still estimates a CCT
+near the anchor, so the table returns near-neutral gains and skin stays
+washed out (face R/B 0.98-1.01 both with the standard and a flattened warm
+end).  Any AWB whose CCT estimate is global grey-world will do this;
+preserving subject colour needs either face-aware statistics or a damped
+(partial) correction that trades a little wall tint for subject warmth.
+
 2026-11-18 update: both shipped profiles dropped the `Ccm` block.  With the
 conjugation fixed, the front matrix still added ~9% green to faces and the
 rear one cast green even on a neutral wall; the underlying blocker is the
