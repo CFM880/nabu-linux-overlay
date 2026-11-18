@@ -596,6 +596,22 @@ out with balanced channels (R/G/B roughly 9.6/9.8/9.0), and the profiles are not
 installed on systems with libcamera < 0.5 because a stale copy makes the IPA
 fail and the camera deliver no frames at all.
 
+The front camera's yellow cast (reported with the tuned profiles) was an
+upstream software-ISP bug, not the tuning: `DebayerCpu` flips the Bayer order
+for BGR888-family outputs and swapped not just the gain tables but also the CCM
+columns plus their `.r/.b` fields, conjugating the matrix with the R/B
+permutation.  Measured on a neutral wall: no Ccm 168.4/167.8/167.8, with Ccm
+196.6/167.5/134.4, identity 162.4/161.9/162.5, and after the fix
+(`patches/libcamera-0.5-debayer-ccm-swap.patch`) 168.1/167.9/169.5.  The
+column swap is correct (the flipped function delivers physically R/B-swapped
+samples); only the field swap had to go.
+
+Open: the rear OV13B10 under the corrected pipeline reads non-neutral with an
+identity matrix on one scene (148.0/173.7/132.3, while the front's identity is
+neutral) and its matrices turn green there - the old bug partially masked
+this.  Next step is the SGRBG statistics channel mapping and the AWB
+convergence for the rear sensor.
+
 The desktop *application* path is closed as well: GNOME Snapshot takes frames
 from the PipeWire camera node, whose SPA plugin was linked against the distro
 libcamera 0.4 - so even with the 0.5 stack installed the app kept uncalibrated

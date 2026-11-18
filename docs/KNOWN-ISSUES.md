@@ -2096,6 +2096,11 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   前摄 OV8856（3280×2464）。当年阻塞项的根因与证据见
   `docs/port-6.18.md` 相机一节：黑帧是调校文件缺 `Lut`（gamma 表全 0），
   前摄无帧是 CSIPHY id 全 0 导致 CSID 从 PHY0 取数。
+- **前摄偏黄已修**：上游软件 ISP 的 CCM bug（BGR888 输出时 `.r/.b` 字段交换
+  把矩阵与 R/B 置换共轭），`patches/libcamera-0.5-debayer-ccm-swap.patch`
+  修复，中性墙实测 196.6/167.5/134.4 → 168.1/167.9/169.5。
+- **后摄颜色待查**：修正后的管线下，某场景单位阵读数 148.0/173.7/132.3
+  （前摄单位阵中性），矩阵在该场景偏绿；需查 SGRBG 统计通道映射与 AWB 收敛。
 - **颜色**：发行版 libcamera 0.4 无 `Ccm`。`nabu-camera/scripts` 可交叉构建
   0.5.2（含 GStreamer 插件）装到 `/usr/local` 并整体回退；GNOME Snapshot 走
   PipeWire，其 SPA 插件原链接 0.4，现可用
