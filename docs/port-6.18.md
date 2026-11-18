@@ -596,6 +596,15 @@ out with balanced channels (R/G/B roughly 9.6/9.8/9.0), and the profiles are not
 installed on systems with libcamera < 0.5 because a stale copy makes the IPA
 fail and the camera deliver no frames at all.
 
+The desktop apps get the calibrated colours too: `nabu-camera/scripts` can
+cross-build libcamera 0.5.2 with its GStreamer plugin and install it under
+`/usr/local`, selected through `GST_PLUGIN_PATH` while the distro 0.4 stays in
+place (`install-camera-modules.sh` then puts the tuning profiles in the 0.5
+prefix).  Verified on the tablet: the session environment carries
+`GST_PLUGIN_PATH`, `gst-inspect-1.0 libcamerasrc` reports 0.5.2 for that
+plugin (0.4 without it), and a `gst-launch libcamerasrc` capture produces
+populated, coloured frames.
+
 **Black frames were a tuning-file bug, not a kernel bug (2026-11-18).**  The
 kernel side is proven: with the media links up (`csiphy0 -> csid0 ->
 vfe0_rdi0`) `v4l2-ctl` reads three consecutive valid RAW frames (mean
