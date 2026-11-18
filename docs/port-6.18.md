@@ -608,22 +608,29 @@ found on the way:
   (which becomes 0) and not 255 (the "unset" default, which clamps everything
   to black).
 
-With `Lut` and `blackLevel: 4096` present and `Ccm` removed, a rear capture is
-100 % non-zero with sensible levels (R mean 103, max 255).  The profiles now
-list `Ccm` and then `Lut`; a capture with that order has not been measured yet
-(see below).
+With `Lut` and `blackLevel: 1024` present and `Ccm` removed, a rear capture is
+100 % non-zero with sensible levels (R mean 103, max 255).  With `Ccm` **before**
+`Lut` (the order the profiles now use) the CCM tables are filled and a
+`cam --capture=5` run delivers five consecutive frames: frame 0 is the CCM
+warm-up (still black), frames 1-4 are 100 % valid (`RGB 83/124/69` at this
+scene).  So the earlier "only the first frame works" observation was the same
+missing-`Lut` bug, not a VFE problem.
+
+Black level: the sensors output a pedestal of about 16 in 10-bit (observed
+raw bytes 17-21 in a dark scene), i.e. 4 in the 8-bit domain the ISP works in,
+so the 16-bit tuning value is `1024`.  `4096` (= 64 << 6) over-subtracts and
+crushes shadows (R 60 vs 83, B 39 vs 69 on the same scene); `64` shifts to 0;
+the absent/default `255` makes everything black.
 
 Open:
 
-- verify `Ccm` + `Lut` in that order on the tablet.  The earlier black output
-  with `Ccm` present was measured with `Lut` listed *before* it, so
-  `activeState.ccm.changed` was not visible to `Lut::prepare()` and the CCM
-  columns stayed zero; that configuration is not the one the profiles ship.
-  If the fixed order still renders black, dump `redCcm/greenCcm/blueCcm` inside
-  `DebayerCpu::process()` and compare against the matrix in the tuning file.
-- the front sensor (ov8856) configures (3272x2464) but delivers no frames and
+- the front sensor (ov8856) configures (3280x2464) but delivers no frames and
   stops after two WM updates;
-- the lens is not driven yet (CN3927 VCM is registered, focus is soft).
+- the lens is not driven by libcamera yet (CN3927 VCM is registered and its
+  driver exposes `V4L2_CID_FOCUS_ABSOLUTE`; the simple pipeline handler has no
+  lens handling, so focus has to be set on the subdev for now);
+- the simple pipeline handler still drops the first frame while the CCM
+  algorithm runs for the first time.
 
 The camera ships in the `debug` product only.
 
