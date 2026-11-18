@@ -560,6 +560,41 @@ rebooted the tablet and the `oops` partition was still all zeroes. UFS has no
 The `PSTORE` frontend and the config options stay (so `/sys/fs/pstore` exists if
 a future boot chain ever keeps RAM), but no backend is enabled.
 
+## Camera (first light 2026-11-17/18)
+
+The `nabu-camera` module now builds on 6.18 and is part of the `debug` product.
+The whole chain works on hardware: `probe of ac4a000.cci returned 0`,
+`probe of ac65000.camss returned 0`, `/dev/media0` carries csiphy0-3, csid0-3 and
+vfe0-3 with `ov13b10 3-0010` (rear), `ov8856 4-0010` (front) and
+`cn3927 focus`, and `cam -l` lists both cameras.  A rear capture delivers a
+4200x3120 frame through libcamera's simple pipeline and software ISP.
+
+What had to change: the old overlay replaced all of `camss` with a copy written
+against an older API (it neither compiles nor helps on 6.18), while upstream 6.18
+has no SM8150 either.  `nabu-camera` now carries only what SM8150 needs on top of
+the current driver - the csiphy/csid/vfe/icc resource tables, `sm8150_resources`,
+the `CAMSS_8150` version and the five places that switch on it.  The sensor, VCM,
+CCI and camcc overlays are unchanged.
+
+Colour: libcamera 0.4 (Debian trixie) has no `Ccm` algorithm, so the simple IPA
+falls back to `uncalibrated.yaml` and the picture is tinted.  The CCMs recovered
+from Qualcomm's tuning blobs (`camera-tuning/*.yaml`) need libcamera >= 0.5;
+0.5.0 has `Ccm` but not `Adjust` (that landed later), so the profiles list `Ccm`
+only.  A cross-built 0.5.0 was verified on the tablet: the same scene then comes
+out with balanced channels (R/G/B roughly 9.6/9.8/9.0), and the profiles are not
+installed on systems with libcamera < 0.5 because a stale copy makes the IPA
+fail and the camera deliver no frames at all.
+
+Open on the kernel side:
+
+- only the first frame of a capture carries data; the rest arrive as zeroed
+  buffers.  The VFE writes the per-frame buffer address with
+  `vfe_wm_update()` (`VFE_BUS_WM_IMAGE_ADDR`), which reads back 0, so the data
+  keeps landing in the first buffer.  Instrumentation is in the overlay (removed
+  again once understood);
+- the front sensor (ov8856) configures (3272x2464) but delivers no frames;
+- the lens is not driven yet (CN3927 VCM is registered, focus is soft).
+
 ## Notes
 
 - `make apply` copies overlays and now stamps them with the current time; the
