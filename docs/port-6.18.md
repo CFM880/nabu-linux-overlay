@@ -606,6 +606,16 @@ permutation.  Measured on a neutral wall: no Ccm 168.4/167.8/167.8, with Ccm
 column swap is correct (the flipped function delivers physically R/B-swapped
 samples); only the field swap had to go.
 
+2026-11-18 update: both shipped profiles dropped the `Ccm` block.  With the
+conjugation fixed, the front matrix still added ~9% green to faces and the
+rear one cast green even on a neutral wall; the underlying blocker is the
+simple IPA's untuned grey-world AWB, which neutralises a face-dominated frame
+and leaves a residual the CCM amplifies.  Colours are now AWB-only (neutral on
+grey, uncorrected chroma); restoring calibration needs the vendor AWB gains
+extracted from the Chromatix blob plus a colour-gain table in the Awb
+algorithm.  The debayer fix patch stays - it is correct and required for any
+future CCM.
+
 Open: the rear OV13B10 under the corrected pipeline reads non-neutral with an
 identity matrix on one scene (148.0/173.7/132.3, while the front's identity is
 neutral) and its matrices turn green there - the old bug partially masked
