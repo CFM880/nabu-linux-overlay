@@ -585,32 +585,44 @@ out with balanced channels (R/G/B roughly 9.6/9.8/9.0), and the profiles are not
 installed on systems with libcamera < 0.5 because a stale copy makes the IPA
 fail and the camera deliver no frames at all.
 
-Open on the kernel side:
+**Black frames were a tuning-file bug, not a kernel bug (2026-11-18).**  The
+kernel side is proven: with the media links up (`csiphy0 -> csid0 ->
+vfe0_rdi0`) `v4l2-ctl` reads three consecutive valid RAW frames (mean
+389/1023), and `camss-video.c` shows one contiguous plane per buffer
+(`nents 1`, `vb->planes[0].length == sizeimage == 16423680` at 4208x3120).
 
-- **only the first frame of a capture carries data**; the rest arrive as zeroed
-  buffers (RGB 0, alpha 255 - the "25 % non-zero" that a byte count shows).
-  What the experiments established:
+The simple IPA delivered `RGB 0, alpha 255` while its input was fine
+(`NABU-DUMP` in `debayer_cpu.cpp`: `size 16423680`, first bytes 70/40/74/45).
+The cause: `camera-tuning/*.yaml` listed `BlackLevel`, `Awb`, `Ccm` but **not
+`Lut`**, so `DebayerParams::gammaLut` was never filled (`DebayerParams` is a
+plain aggregate, so it stayed zero) and the CCM store path
+(`GAMMA(blue.b + green.b + red.b)`) indexed an all-zero table - an all-black
+image.  Upstream's `uncalibrated.yaml` always lists `Lut`.  Two further traps
+found on the way:
 
-  | Check | Result |
-  |---|---|
-  | driver-side addresses | `vfe_wm_update()` runs per frame and alternates between the two 16 MB buffers (`0xfd000000`/`0xfe000000`/`0xff000000`), so the addresses are right |
-  | high 32 bits (`IMAGE_ADDR_OFFSET`, never written upstream) | 0 - the buffers are below 4 GB, so truncation is *not* the cause |
-  | re-writing `WM_CFG` per frame (Qualcomm's bus ver2 does this) | no change |
-  | `FRAME_INC = 0` instead of `stride * height` | worse: even the first frame stays black, so `FRAME_INC` is what the WM uses to size a frame |
+- `Lut` must come **after** `Ccm` in the algorithm list: `Ccm::prepare()` sets
+  `activeState.ccm.changed`, and `Lut::prepare()` fills the CCM/gamma lookup
+  tables only when it sees that flag or a black-level change.
+- `BlackLevel::init()` does `blackLevel >> 8`, i.e. the value is 16-bit.  For
+  the 10-bit sensors here the correct value is `4096` (64 << 6), not `64`
+  (which becomes 0) and not 255 (the "unset" default, which clamps everything
+  to black).
 
-  So the hardware keeps writing to the first programmed address.  The next step
-  is the vendor model: `cam_vfe_bus_ver2` submits the WM registers through the
-  CDM inside each request, and its address handling is a queue of
-  `irq_subsample_period + 1` entries (0 by default, so one per frame here).
-  Compare that latching with mainline's direct `reg_update`, or try the VFE lite
-  output path instead of the full VFE.
+With `Lut` and `blackLevel: 4096` present and `Ccm` removed, a rear capture is
+100 % non-zero with sensible levels (R mean 103, max 255).  Keeping `Ccm` still
+produces an all-zero image, so the `Ccm` lookup path in libcamera 0.5 is the
+one open item there (the profiles keep `Ccm`; a capture with it is the test).
+
+Open:
+
+- libcamera 0.5's `Ccm` lookup tables still render black on this sensor; the
+  non-CCM path works.  Next step is to dump `redCcm/greenCcm/blueCcm` inside
+  `DebayerCpu::process()` and compare against the matrix in the tuning file.
 - the front sensor (ov8856) configures (3272x2464) but delivers no frames and
   stops after two WM updates;
 - the lens is not driven yet (CN3927 VCM is registered, focus is soft).
 
-Until the WM issue is understood the camera is usable for **single-frame**
-captures only (restart the stream per shot); it ships in the `debug` product
-only.
+The camera ships in the `debug` product only.
 
 ## Notes
 
