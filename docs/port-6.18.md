@@ -647,7 +647,11 @@ select; with that, `cam` on the front camera returns three consecutive
 
 Open:
 
-- the lens is not driven by libcamera yet.  The CN3927 VCM itself works:
+- the lens is not driven by libcamera yet (no `LensPosition`/AF control in the
+  simple pipeline).  `nabu-autofocus` fills the gap: `nabu-autofocus --once`
+  runs a coarse and a fine scan over `/dev/v4l-subdev25` while keeping the
+  lens open, takes frames through the distro libcamera's GStreamer plugin and
+  locked focus at 288 (score 35) in a test scene.  The CN3927 VCM itself works:
   `/dev/v4l-subdev25` exposes `focus_absolute` 0-1023 and a sweep, with the
   subdev held open (`v4l2-ctl --sleep`), changes the centre-crop gradient of
   the rear camera from 3.92 (focus 200) to 2.90 (focus 1023), so the actuator
