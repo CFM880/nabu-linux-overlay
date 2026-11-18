@@ -596,6 +596,18 @@ out with balanced channels (R/G/B roughly 9.6/9.8/9.0), and the profiles are not
 installed on systems with libcamera < 0.5 because a stale copy makes the IPA
 fail and the camera deliver no frames at all.
 
+The desktop *application* path is closed as well: GNOME Snapshot takes frames
+from the PipeWire camera node, whose SPA plugin was linked against the distro
+libcamera 0.4 - so even with the 0.5 stack installed the app kept uncalibrated
+colours and no autofocus.  `nabu-camera/scripts/build-pipewire-libcamera-0.5.sh`
+rebuilds just that plugin against the 0.5 stack and
+`install-pipewire-libcamera-0.5.sh` swaps it in (distro file kept as
+`.nabu-orig`).  Measured: wireplumber logs `libcamera v0.5.2`, the node
+instantiates `BlackLevel/Awb/Ccm/Lut/Agc` from the tuned profile and
+`focus_absolute` runs the scan while the node streams (824 -> 762 -> locked).
+The node still enumerates only up to 4096x2160, which caps the app's still
+resolution.
+
 The desktop apps get the calibrated colours too: `nabu-camera/scripts` can
 cross-build libcamera 0.5.2 with its GStreamer plugin and install it under
 `/usr/local`, selected through `GST_PLUGIN_PATH` while the distro 0.4 stays in

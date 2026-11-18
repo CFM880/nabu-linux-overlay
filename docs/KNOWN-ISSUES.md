@@ -2097,9 +2097,11 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   `docs/port-6.18.md` 相机一节：黑帧是调校文件缺 `Lut`（gamma 表全 0），
   前摄无帧是 CSIPHY id 全 0 导致 CSID 从 PHY0 取数。
 - **颜色**：发行版 libcamera 0.4 无 `Ccm`。`nabu-camera/scripts` 可交叉构建
-  0.5.2（含 GStreamer 插件）装到 `/usr/local` 并整体回退；但 **GNOME Snapshot
-  走 PipeWire → 系统 0.4**，不经过 0.5.2，所以内置应用颜色未校准，且
-  PipeWire 节点只枚举到 4096×2160（无传感器原生 4:3）。
+  0.5.2（含 GStreamer 插件）装到 `/usr/local` 并整体回退；GNOME Snapshot 走
+  PipeWire，其 SPA 插件原链接 0.4，现可用
+  `build/install-pipewire-libcamera-0.5.sh` 换成链接 0.5.2 的版本
+  （实测：节点实例化 `BlackLevel/Awb/Ccm/Lut/Agc`，AF 随流扫描）。
+  遗留：PipeWire 节点仍只枚举到 4096×2160（无传感器原生 4:3）。
 - **自动对焦**：`nabu-camera/patches/libcamera-0.5-simple-autofocus.patch` 在
   simple pipeline 中接入镜头并实现对比度扫描（`AfMode`，默认 Continuous），
   实测锁定 253（score 74）；前摄无 VCM。`camera-app/nabu-autofocus`
