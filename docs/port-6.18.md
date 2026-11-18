@@ -62,6 +62,15 @@ The panel driver stays a module (`CONFIG_DRM_PANEL_NOVATEK_NT36523=m`); the
 earlier attempt to build it in (`=y`) was reverted, and the ~24 s figure that
 was blamed on it came from the serial console plus a stale 6.14 UKI on the ESP.
 
+Plymouth is now disabled on the command line (`plymouth.enable=0`, all product
+and image cmdlines).  Debian's `initramfs-tools` `init-premount/plymouth`
+script defaults to starting `plymouthd` unless `nosplash` or
+`plymouth.enable=0` is present, and at that point the panel driver is still a
+module, so there is no DRM device: the splash never appears and boot/reboot
+sits waiting for `plymouthd`.  `plymouth-start.service` has
+`ConditionKernelCommandLine=!plymouth.enable=0`, so the same switch also stops
+the systemd side.
+
 For the very first lines (bootloader and the first half second) a serial console
 is still the only option.  The `serial-debug` product that carried it was
 removed on 2026-11-16 (the `nabu-serial` module stays available), and tracing
@@ -630,12 +639,12 @@ four subdevs were named `msm_csiphy0`, and CSID programmed
 CSIPHY0 so it worked; the front sensor is on CSIPHY1, its data was looked for
 on PHY 0, and no frame ever reached the VFE (the sensor does run: register
 `0x0100` reads back `0x01`).  Passing the loop index, as csid and vfe already
-do, fixes both the names and the PHY select.
+do, gives the subdevs their real names (`msm_csiphy0`-`3`) and the right PHY
+select; with that, `cam` on the front camera returns three consecutive
+3280x2464 frames, frames 1-2 fully populated.
 
 Open:
 
-- the front sensor (ov8856) configures (3280x2464) but delivers no frames and
-  stops after two WM updates;
 - the lens is not driven by libcamera yet (CN3927 VCM is registered and its
   driver exposes `V4L2_CID_FOCUS_ABSOLUTE`; the simple pipeline handler has no
   lens handling, so focus has to be set on the subdev for now);
