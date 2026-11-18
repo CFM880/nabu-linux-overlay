@@ -656,8 +656,18 @@ select; with that, `cam` on the front camera returns three consecutive
 
 Open:
 
-- the lens is not driven by libcamera yet (no `LensPosition`/AF control in the
-  simple pipeline).  `nabu-autofocus` fills the gap: `nabu-autofocus --once`
+- autofocus now lives in libcamera itself (`nabu-camera/patches/
+  libcamera-0.5-simple-autofocus.patch`, applied by the 0.5 build script):
+  the simple pipeline attaches `CameraSensor::focusLens()` to the software ISP
+  and exposes `AfMode` (Manual/Auto/Continuous, default Continuous), while
+  `DebayerCpu` emits a level-normalised green-gradient score and `SoftwareIsp`
+  runs a coarse + fine scan, tracks the scene and keeps the lock across stream
+  reconfiguration.  Measured: coarse 0..1016 in 127 steps, fine around the
+  peak, `Autofocus locked at 253 score 65`, and `focus_absolute` reads back 253
+  after the process exits.  Upstream (0.5..0.8 and master) has neither the lens
+  plumbing nor the algorithm, and Qualcomm's own AF tuning sits in the closed
+  Chromatix blob inside `super`, so the scan parameters are measured.
+- the older userspace helper is still available for manual work:  `nabu-autofocus` fills the gap: `nabu-autofocus --once`
   runs a coarse and a fine scan over `/dev/v4l-subdev25` while keeping the
   lens open, takes frames through the distro libcamera's GStreamer plugin and
   locked focus at 288 (score 35) in a test scene.  The CN3927 VCM itself works:
