@@ -622,6 +622,16 @@ so the 16-bit tuning value is `1024`.  `4096` (= 64 << 6) over-subtracts and
 crushes shadows (R 60 vs 83, B 39 vs 69 on the same scene); `64` shifts to 0;
 the absent/default `255` makes everything black.
 
+The front camera had a separate kernel cause.  `camss_init_subdevices()` was
+passing `res->csiphy_res[i].csiphy.id` as the CSIPHY id (an older-API habit);
+the SM8150 table has no `.id` values, so every CSIPHY came up as id 0 - all
+four subdevs were named `msm_csiphy0`, and CSID programmed
+`CSID_CSI2_RX_CFG0.PHY_NUM_SEL` with 0 for every camera.  The rear sensor is on
+CSIPHY0 so it worked; the front sensor is on CSIPHY1, its data was looked for
+on PHY 0, and no frame ever reached the VFE (the sensor does run: register
+`0x0100` reads back `0x01`).  Passing the loop index, as csid and vfe already
+do, fixes both the names and the PHY select.
+
 Open:
 
 - the front sensor (ov8856) configures (3280x2464) but delivers no frames and
