@@ -609,14 +609,17 @@ found on the way:
   to black).
 
 With `Lut` and `blackLevel: 4096` present and `Ccm` removed, a rear capture is
-100 % non-zero with sensible levels (R mean 103, max 255).  Keeping `Ccm` still
-produces an all-zero image, so the `Ccm` lookup path in libcamera 0.5 is the
-one open item there (the profiles keep `Ccm`; a capture with it is the test).
+100 % non-zero with sensible levels (R mean 103, max 255).  The profiles now
+list `Ccm` and then `Lut`; a capture with that order has not been measured yet
+(see below).
 
 Open:
 
-- libcamera 0.5's `Ccm` lookup tables still render black on this sensor; the
-  non-CCM path works.  Next step is to dump `redCcm/greenCcm/blueCcm` inside
+- verify `Ccm` + `Lut` in that order on the tablet.  The earlier black output
+  with `Ccm` present was measured with `Lut` listed *before* it, so
+  `activeState.ccm.changed` was not visible to `Lut::prepare()` and the CCM
+  columns stayed zero; that configuration is not the one the profiles ship.
+  If the fixed order still renders black, dump `redCcm/greenCcm/blueCcm` inside
   `DebayerCpu::process()` and compare against the matrix in the tuning file.
 - the front sensor (ov8856) configures (3272x2464) but delivers no frames and
   stops after two WM updates;
