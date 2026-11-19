@@ -1640,6 +1640,17 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   按充电器状态自动选睡眠模式 —— **AC → `s2idle`、电池 → `deep`** ✓。
   实测：拔掉 → `s2idle [deep]`、插回 → `[s2idle] deep`，均由 udev 事件自动完成 ✓。
   AC 用 s2idle 不损失待机收益（插电时不需要省电），电池仍保持 ~1 %/h ✓。
+- **唤醒后屏幕不亮（2026-11-19，已修 `nabu-platform`）**：电池深睡后按电源键能唤醒 SoC
+  （`PM: suspend exit`），但屏幕一直黑，只有插充电器才有反应。根因是
+  `pm8941-pwrkey.c` **故意吞掉唤醒那一次按键**（不吞的话 logind 会立刻再次挂起），
+  于是合成器收不到任何输入事件，DPMS/空闲状态不会被重置 ✗。
+  修法：`pm8941_pwrkey_resume()` 上报一次 **`KEY_WAKEUP`**（s2idle 走
+  `consumed_press` 标记；`mem` 路径按键在 resume 时仍按住则直接判断
+  `PON_RT_STS`）。合成器把任意按键当活动 → 亮锁屏 ✓；logind/gsd 只认
+  `KEY_POWER` → 不会被误挂起 ✓。
+  实测（`3d69732b`）：电池下按电源挂起 → 10 秒后按一次 → 锁屏直接回来
+  （`PM: suspend entry (deep)` 19:57:25 → `PM: suspend exit` 19:57:37）；
+  修前按一次屏幕仍黑 ✗。
 
 ### 2.6 USB 控制器的 runtime PM 属于内核层，不再用 udev 规则规避（2026-10-27）
 - **旧做法**：`nabu-power/config/99-nabu-runtime-pm.rules` 把 `a600000.usb`（Type-C 的

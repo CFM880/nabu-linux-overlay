@@ -213,6 +213,23 @@ action gives `APSD_RESULT=0x08`, `ICL_STATUS=2600 mA`, `POWER_PATH=0x95`
 plug before the change was 100 mA and -825 mA.  Cable at boot still gives
 3000 mA / +2.55 A.
 
+### The wake press lights the panel again (fixed 2026-11-19)
+
+Platform `mem` suspend resumed but the panel stayed dark: pressing the power button brought the
+SoC back (`PM: suspend exit`) with nothing on screen, and only plugging the charger lit it.  The
+`pm8941-pwrkey` driver consumes the wake press on purpose — a delivered `KEY_POWER` makes logind
+suspend again right after the resume completes — so the compositor never sees an input event and
+its idle/DPMS state is never reset.
+
+`pm8941_pwrkey_resume()` now reports `KEY_WAKEUP` when the wake press was consumed (the s2idle
+path) or when the key is still down at resume time (the `mem` path, where the child IRQ only
+runs after `resume_device_irqs()`).  A compositor treats any key as activity and shows the lock
+screen; logind and gsd only act on `KEY_POWER`, so it cannot re-suspend the tablet.
+
+Verified on `6.18.59-nabu-full-debug-3d69732b`: on battery, suspend with the power button, press
+once after 10 s — the lock screen comes back (`PM: suspend entry (deep)` 19:57:25 →
+`PM: suspend exit` 19:57:37).  Before the change one press left the panel dark.
+
 ### Auto-brightness (GNOME's own, standard interfaces)
 
 The port does **not** ship its own brightness daemon.  The stack exposes the
