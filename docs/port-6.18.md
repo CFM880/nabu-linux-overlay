@@ -86,6 +86,30 @@ serial is a real printk console (`/proc/consoles` lists `ttyGS0`, kernel log say
 gadget enumerates), so the same log can be captured on a host with
 `screen /dev/ttyACM0 115200`.
 
+### Release build and how the tablet picks a kernel (2026-11-19)
+
+`production` now ships the camera as well: its module list is the same eight modules as `debug`,
+so the two products differ only in the command line (`debug` adds `loglevel=8 initcall_debug
+no_console_suspend pm_debug_messages`) and in the release name.  The daily build is
+`6.18.59-nabu-full-ebe2c77f`, produced with `make PRODUCT=production`.
+
+The board does not boot through an NVRAM boot entry: the ABL's `MsTemp` entry points at the ESP
+partition, `EFI/BOOT/bootaa64.efi` is **rEFInd**, and it auto-boots the file last chosen in its
+menu.  That file has been `EFI/debian/6.18.59-nabu-full-debug-9881eaec.efi` since the first
+install, no matter which release name `deb-install` wrote.  Installing a new release therefore
+needs either a copy of the new UKI over that name, or a manual selection in the rEFInd menu:
+
+```sh
+mcopy -o -i /dev/sda31 ::/EFI/debian/<new-release>.efi \
+        ::/EFI/debian/6.18.59-nabu-full-debug-9881eaec.efi
+```
+
+`nabu-debian.efi` was refreshed with the same production UKI as the canonical fallback, and the
+duplicate release-named copy was removed.  Verified on the booted build: production command line
+(no `loglevel`/`initcall_debug`), camera modules loaded (`ov13b10`, `ov8856`, `camcc`, `csiphy`,
+`cn3927`) with `/dev/video0..10`, the charger ICL override still applied, `rtcwake -m mem`
+returning cleanly, `iio-sensor-proxy` active.
+
 ### Kernel release carries its content
 
 `nabu-main/scripts/nabu` appends a short hash of everything that shapes the
