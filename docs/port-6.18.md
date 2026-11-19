@@ -446,6 +446,265 @@ disabled.
 
 ## Standby power (open: ~1.5 %/h vs Android's 0.125 %/h)
 
+### Deep suspend with a charger attached (fixed 2026-11-19)
+
+Platform `mem` suspend died whenever a charger was attached: the log stopped at
+`PM: suspend entry (deep)`, there was no resume output and no pstore record, and the tablet
+either rebooted by itself or needed a 15 s power-button reset (five times on 2026-11-19).
+
+Localised with `pm_test` and by unbinding the charger:
+
+- `pm_test=devices` passes (device suspend 304 ms, resume 419 ms), so every driver's
+  suspend/resume callback is fine;
+- `pm_test=platform` passes on battery and hangs on AC, so the failure is in the noirq phase;
+- with AC attached but `qcom_pmi8998_charger` unbound, `pm_test=platform` passes — the hang is
+  in that driver's PM path, which had only `.resume` plus
+  `dev_pm_set_wake_irq(chip->dev, cable_irq)`.
+
+`dev_pm_set_wake_irq()` leaves the arming to the PM core, which does it in the noirq phase
+(`device_wakeup_arm_wake_irqs()`); arming an SPMI-backed IRQ that late stalls when a charger is
+present.  The driver now registers itself with `device_init_wakeup()` and arms/disarms the cable
+IRQ in `.suspend`/`.resume`, the phase the pwrkey driver already uses for the same reason.
+
+Verified on `6.18.59-nabu-full-debug-adaedbfa` with the charger attached: 10/10 `rtcwake -m mem`
+cycles return cleanly, `pm_test=platform` (the exact test that used to hang) returns 0, and
+plugging the charger into a deep suspend wakes the tablet (`PM: suspend exit` 22:26:48 with the
+charger's APSD right behind it, well before the 180 s RTC alarm).  The `AC -> s2idle` udev
+workaround that shipped earlier the same day is gone.
+
+### The wake press lights the panel again (fixed 2026-11-19)
+
+Platform `mem` suspend resumed but the panel stayed dark: pressing the power button brought the
+SoC back (`PM: suspend exit`) with nothing on screen, and only plugging the charger lit it.  The
+`pm8941-pwrkey` driver consumes the wake press on purpose — a delivered `KEY_POWER` makes logind
+suspend again right after the resume completes — so the compositor never sees an input event and
+its idle/DPMS state is never reset.
+
+`pm8941_pwrkey_resume()` now reports `KEY_WAKEUP` when the wake press was consumed (the s2idle
+path) or when the key is still down at resume time (the `mem` path, where the child IRQ only
+runs after `resume_device_irqs()`).  A compositor treats any key as activity and shows the lock
+screen; logind and gsd only act on `KEY_POWER`, so it cannot re-suspend the tablet.
+
+Verified on `6.18.59-nabu-full-debug-3d69732b`: on battery, suspend with the power button, press
+once after 10 s — the lock screen comes back (`PM: suspend entry (deep)` 19:57:25 →
+`PM: suspend exit` 19:57:37).  Before the change one press left the panel dark.
+
+### Auto-brightness (GNOME's own, standard interfaces)
+
+The port does **not** ship its own brightness daemon.  The stack exposes the
+standard interfaces and the desktop decides:
+
+- backlight: `ktz8866-backlight` (`brightness`, `max_brightness = 2047`,
+  linear scale) - no curve in the driver;
+- ambient light: `net.hadess.SensorProxy.LightLevel` in **lux** with the usual
+  claim/refcount semantics (iio-sensor-proxy, with the SSC backend patch that
+  only rejects sensor noise);
+- the only writer is gnome-settings-daemon, through
+  `org.gnome.SettingsDaemon.Power.Screen.Brightness`, so the OSD, the slider and
+  the persistence are the desktop's own.
+
+That is also what any laptop does, and it is why `ambient-enabled` is `true` in
+`config/00-nabu-desktop`: the "Automatic Screen Brightness" switch in Settings
+belongs to gsd, and it works.
+
+**Known limitation of that arrangement (measured on the tablet).** gsd's ambient
+support has no lux -> brightness table; it maps relative to a reference it
+re-derives from the brightness on screen:
+
+```
+percent = 100 * LightLevel / A        A = 100 * LightLevel / percent_on_screen
+```
+
+so the absolute level follows the last manual brightness, and a reference taken
+in a bright room leaves the panel dim later on (23.6 lux at 53 % measured while
+the room called for more).  That is gsd's design, not an interface bug.
+
+A fixed lux -> backlight curve was implemented and evaluated on hardware and is
+deliberately **not shipped**:
+
+- feeding gsd the curve value instead of lux fixes the shape but the level is
+  still scaled by `A`: after a manual change to 30 % the whole curve shrank, and
+  the reference can wedge (6 % on screen while the curve wanted 60 %);
+- estimating `A` from the resulting backlight makes it exact in steady light
+  (69 % held for 60 s with no correction) but it wanders while the light drifts
+  (81 -> 72 -> 68 -> 59 -> 68) and stalls when the light keeps changing;
+- an absolute curve therefore needs a writer of its own (a user daemon) or a
+  patch inside gsd.  Neither is part of this port: the extra service was
+  rejected in review and a gsd patch would have to be carried against a distro
+  package.
+
+## Suspend / wake (solved: s2idle and platform `mem` deep sleep)
+
+`systemctl suspend` (or `echo mem > /sys/power/state`) suspends all devices,
+the tablet stays asleep, and **one** press of the power key wakes it with the
+screen on.  Two PMIC problems had to be fixed in
+carried as an overlay of `drivers/input/misc/pm8941-pwrkey.c`
+(`nabu-platform/kernel-overlay/`), enabled with
+`qcom,suspend-irq-mask-ms = <1000>` on `&pon_pwrkey`:
+
+**1. The suspend-entry transient.**  A couple of milliseconds after
+`PM: suspend-to-idle` the PMIC asserts `PON_RT_STS` bit0 (KPDPWR) for ~180 ms
+although nobody touches the tablet, and with the IRQ armed as a wakeup source
+that aborts the suspend (`PM: Triggering wakeup from IRQ 118`, then
+`resume from suspend-to-idle`).  Measured identically on `6.14.11-nabu-full`,
+so it is the tablet, not a 6.18 regression.  `PON_DBC_CTL` reads back `0x8`
+(default 15.6 ms) even with `debounce = <250000>` in the DT, so the hardware
+debounce cannot filter it.  Leaving the IRQ unarmed (`IRQF_NO_SUSPEND` without
+`enable_irq_wake()`) keeps the system asleep but makes it unwakeable: once
+idle, the AP never receives the PMIC interrupt at all, so a real press does
+nothing.
+
+The fix keeps the wakeup path armed and clears the PON interrupt enable in
+`pm8941_pwrkey_suspend()` (`PON_INT_EN_CLR`), so the transient never becomes
+an IRQ.  A 1 s timer reads `PON_RT_STS` (dropping any latch that appeared
+meanwhile) and sets `PON_INT_EN_SET` again.
+
+**2. The waking press reached userspace.**  It was reported as `KEY_POWER`, so
+logind suspended again ~1.7 s after the resume completed: the screen flashed
+and went dark, and a second press was needed.  The driver now consumes the
+press and its release while suspended and for 500 ms after resume.
+
+**CPU idle states and s2idle.**  The 1 s unmask above needs kernel timers to
+run across s2idle, and so does every other timer-based wakeup.  s2idle freezes
+the tick (`tick_freeze()`) and `cpuidle_enter_s2idle()` never calls
+`tick_broadcast_enter()`, so a PSCI state with `local-timer-stop` loses every
+timer armed before the suspend: the broadcast timer (`arch_mem_timer`) is
+never programmed.  Measured: with the `cpu-sleep-*` states usable for s2idle
+the unmask print never appeared and the tablet could not be woken.  Removing
+`local-timer-stop` hangs the boot (the arch timer really does stop), so the
+states carry `qcom,no-s2idle` and `cpuidle-psci` drops their `enter_s2idle`
+callback (overlay of `drivers/cpuidle/cpuidle-psci.c`).  Runtime idle still
+enters them (`cpu0/cpuidle/state1/usage` keeps growing) and s2idle stays in
+WFI.
+
+**Why "real" s2idle (rail collapse while suspended) does not work.**  Two
+prototypes were measured, using a black-box marker in a PM8150 SDAM byte
+(`sdam@b100`, offset 0x7e): it is PMIC-internal always-on RAM, so the last
+value written before a hang survives an AP reset and can be read back through
+`/sys/bus/nvmem/devices/spmi_sdam1/nvmem` after the hard reset.
+
+1. Adding the missing `tick_broadcast_enter()`/`tick_broadcast_exit()` around
+   the s2idle state entry (mirroring `cpuidle_enter_state()`) and removing
+   `qcom,no-s2idle`: the marker stopped at "broadcast entered, state being
+   entered" (0x13) and never advanced to "state returned" (0x14).  The 1 s
+   unmask timer also never ran (its mark 0x02 never appeared), so the state
+   was entered with the broadcast programmed and still no timer fired.
+
+2. To separate "timers do not work" from "nothing can wake this state", the
+   power key IRQ was kept enabled and non-armed (`IRQF_NO_SUSPEND` +
+   `enable_irq_wake()`, handler drops the entry transient and calls
+   `pm_system_wakeup()` on a real press).  The marker showed the transient
+   IRQ *was* delivered at suspend entry (0x21) but a press 20 s later never
+   produced an IRQ (no 0x22), and the tablet had to be hard-reset.
+
+So the CPU cannot be woken out of the `cpu-sleep-*` rail-collapse state during
+s2idle on this port, by either the broadcast timer or the PMIC/PDC interrupt
+(the SPMI arbiter is already routed through PDC pin 1), even though runtime
+idle uses the same state and wakes fine (there another CPU handles timers).
+All prototypes were reverted; `qcom,no-s2idle` keeps s2idle in WFI, and
+standby power is therefore higher than ideal on this port.
+
+**How the vendor kernel does it, and how far a mainline port gets.**  The 4.14
+vendor kernel does not use s2idle at all: it uses `mem` deep suspend through
+Quadcom's LPM framework (`drivers/cpuidle/lpm-levels.c` +
+`drivers/soc/qcom/system_pm.c`).  For the cluster level marked
+`qcom,notify-rpm` (PSCI mode `0xC24`, "LLCC off, AOSS sleep") it reads the
+always-on arch timer compare value and writes it as the **PDC wakeup timer**
+through the RPMh CONTROL TCS, then `rpmh_flush()`es the sleep/wake votes, and
+only then calls PSCI `CPU_SUSPEND`, with the SPM/SAW already programmed by
+`cluster_prepare()`/`cpu_prepare()`.
+
+Mainline already has the CONTROL TCS write path
+(`rpmh_rsc_write_next_wakeup()`), but it deliberately writes `~0` during
+`SYSTEM_SUSPEND`, disabling timer wakeups.  A prototype changed it to write
+`CNTV_CVAL_EL0` (and, in a second run, a fixed now+1s) and let s2idle use the
+`cpu-sleep-*` states again: the SDAM marker showed the write happened (0x32,
+"CONTROL TCS written", register layout verified identical to the vendor's
+`tcs_control_write()`) but the CPU was still not woken (the 1 s unmask timer
+never ran, no 0x02).  Note that the vendor does **not** use an SPM/SAW on
+sm8150 either (`cpu_prepare()` only calls `cpu_pm_enter()` and the DTS has no
+SAW nodes), so that was not the missing piece.
+
+**Platform `mem` suspend (AOSS deep sleep) — works since 2026-11-11.**  A
+driver registering `suspend_ops` for `mem` does what the vendor does: the PM
+core offlines the secondary CPUs (its `cpu_pm_suspend` syscore op flushes the
+RPMh sleep/wake votes), and the last CPU calls
+`psci_cpu_suspend_enter(0x4100c244)` — reset flag, affinity 1, cluster mode
+`0xC24` ("LLCC off, AOSS sleep"), CPU mode 4 ("rail power collapse"), i.e. the
+exact state the vendor's LPM DT computes.  Measured results on
+`6.18.59-nabu-full`: 60/60 `rtcwake` cycles resume cleanly, and the power key
+suspends the tablet and wakes it with the screen on (3/3 with 30 s sleeps).
+
+Five things had to be right; each was measured, and the wrong variants are
+listed because they look plausible:
+
+1. **Nothing but PSCI in `.enter()`.**  The SPMI arbiter and the PMIC are
+   already partly gated by then: a PMIC register access from that context can
+   stall the bus and hang the machine with interrupts off (the hang moves to
+   wherever the access is made).  The key interrupt is armed from
+   `pm8941_pwrkey_suspend()`/`suspend_noirq()` instead, where the bus is fine.
+2. **Acknowledge the entry transient inside a bounded window.**  A latched
+   PMIC event keeps the SPMI summary line asserted, and PSCI refuses to sleep
+   while an interrupt is pending — every attempt returns in ~5 ms.  The
+   platform entry enables interrupts for a moment before each attempt so the
+   chained flow acks the PMIC normally, but only during the first
+   `NABU_WINDOW_MS` (1.5 s).  Outside that window a pending event can only be
+   a real wake press, and handling it there would swallow it (the driver drops
+   events while suspended) and the tablet would sleep again with nothing left
+   to wake it.  That failure looked exactly like "press, flash, sleep, never
+   wakeable".
+3. **Do not write the PDC wakeup timer.**  The vendor programs it from the
+   arch timer compare value; on mainline the equivalent made every kernel
+   timer wake the SoC (repeated ~740 ms entries, suspend lasting only 1/7 of
+   the time).  Leaving mainline's `~0` (timer disabled) is what a
+   key/RTC-woken suspend wants.
+4. **Do not "restore" the PDC registers.**  The vendor's
+   `CONFIG_QTI_PDC_SAVE_RESTORE` saves the enable banks and writes them back,
+   which is harmless in their flow, but a software shadow of those banks does
+   not contain the bits set by firmware/other drivers: rewriting them disarmed
+   wake sources and produced deep sleeps that nothing could wake.  The PDC
+   keeps its configuration across the AOSS sleep on this SoC.
+5. **Deliver the wake press to userspace.**  `enable_irq_wake()` on the key
+   actually succeeds (it returns 0, the nested `irq_set_irq_wake()` on the
+   chained SPMI summary is a no-op because the PDC sets
+   `IRQCHIP_SKIP_SET_WAKE`), but `suspend_device_irqs()` disables the key
+   interrupt as a non-wakeup source *after* the driver armed it, and the
+   pending press is then handled before `pm8941_pwrkey_resume()` runs, while
+   the driver still has `suspended` set.  It is re-armed from
+   `suspend_noirq` (after the masking) and the flag is cleared from a syscore
+   resume callback (before interrupts are enabled), so logind sees the press
+   and wakes the display.
+
+The SDAM black-box marker (PM8150 `sdam@b100`, byte 0x7e plus a 16-byte ring
+at 0x60..0x6f, read back through
+`/sys/bus/nvmem/devices/spmi_sdam1/nvmem`) is what made this tractable: the
+kernel log of a failed suspend dies with the reset, the PMIC RAM does not.
+Note that writes to it must not happen from `.enter()` either (see 1).
+
+Verified for the `mem` path on `6.18.59-nabu-full` (60/60 `rtcwake`
+cycles resume cleanly; power-key suspend and wake with 30 s sleeps, 3/3):
+
+    [   46.134348] PM: suspend entry (deep)
+    [   46.207800] nabu: pwrkey wake arm ret=0 in .suspend
+    [   46.215269] nabu: pwrkey re-armed in noirq
+    ... (entry attempts during the transient window) ...
+    [   46.633294] PM: suspend exit
+
+Verified for s2idle on the same kernel (13 s of real sleep, one press wakes
+it, the screen stays on):
+
+    [198.674671] PM: suspend entry (s2idle)
+    [199.318236] PM: suspend-to-idle
+    [200.323397] ...pwrkey: key IRQ unmasked, RT_STS=0x4      <- +1s timer
+    [212.763566] PM: Triggering wakeup from IRQ 118           <- power key
+    [213.476425] PM: suspend exit
+
+and the diagnostic build showed the unmask timer firing across s2idle
+(`nabu: key IRQ unmasked` at +1.0 s) only once the CPU idle states were
+disabled.
+
+## Standby power (open: ~1.5 %/h vs Android's 0.125 %/h)
+
 ### Deep suspend does not survive an attached charger (2026-11-19)
 
 Platform `mem` suspend works on battery but dies with a charger attached: the log stops at

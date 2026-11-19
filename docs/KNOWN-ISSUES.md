@@ -1636,10 +1636,15 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
      该驱动只有 `.resume` 和 `dev_pm_set_wake_irq(chip->dev, cable_irq)` 两处与 PM 相关，
      而 `power/wakeup` 在这台机器上不存在，无法从用户空间关掉，验证需要重编内核。
   - 注意：解绑后再 bind 会失败（probe 卡住，load 8+），只能重启恢复。
-- **临时规避（2026-11-19，`nabu-power` `bin/nabu-mem-sleep` + `60-nabu-mem-sleep.rules`）**：
-  按充电器状态自动选睡眠模式 —— **AC → `s2idle`、电池 → `deep`** ✓。
-  实测：拔掉 → `s2idle [deep]`、插回 → `[s2idle] deep`，均由 udev 事件自动完成 ✓。
-  AC 用 s2idle 不损失待机收益（插电时不需要省电），电池仍保持 ~1 %/h ✓。
+- **修复（2026-11-19，`nabu-power` `power: arm the plug IRQ in .suspend`）**：
+  `dev_pm_set_wake_irq()` 把武装交给 PM core，后者在 **noirq 阶段**执行
+  `device_wakeup_arm_wake_irqs()`；此时访问 SPMI 上的 IRQ 会挂死 ✗。
+  改为 `device_init_wakeup()` + 在 `.suspend`/`.resume` 里显式
+  `enable_irq_wake()`/`disable_irq_wake()`（与 pwrkey 驱动同一阶段，PMIC 总线健康）✓。
+  - **实测（`adaedbfa`，插着充电器）**：`rtcwake -m mem` **10/10 全部正常返回** ✓；
+    之前必挂的 `pm_test=platform` 现在 **rc=0** ✓；
+    深睡中插入充电器可唤醒（`PM: suspend exit` 22:26:48，紧接 APSD，远早于 180 s RTC 闹钟）✓。
+  - 当天早些时候的「AC→s2idle」udev 规避**已删除**（`nabu-mem-sleep` 脚本与规则）✓。
 - **唤醒后屏幕不亮（2026-11-19，已修 `nabu-platform`）**：电池深睡后按电源键能唤醒 SoC
   （`PM: suspend exit`），但屏幕一直黑，只有插充电器才有反应。根因是
   `pm8941-pwrkey.c` **故意吞掉唤醒那一次按键**（不吞的话 logind 会立刻再次挂起），
