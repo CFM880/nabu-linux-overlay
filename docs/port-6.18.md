@@ -429,6 +429,32 @@ disabled.
 
 ## Standby power (open: ~1.5 %/h vs Android's 0.125 %/h)
 
+### Deep suspend does not survive an attached charger (2026-11-19)
+
+Platform `mem` suspend works on battery but dies with a charger attached: the log stops at
+`PM: suspend entry (deep)`, there is no resume output and no pstore record, and the tablet
+either reboots by itself or needs a 15 s power-button reset.  Five occurrences on 2026-11-19
+(16:58, 17:09 ×2, 18:23, 18:37) were all idle sessions on AC.
+
+Localised with `pm_test` and by unbinding the charger:
+
+- `pm_test=devices` passes (device suspend 304 ms, resume 419 ms), so every driver's
+  suspend/resume callback is fine;
+- `pm_test=platform` passes on battery and hangs on AC, so the failure is in the noirq phase
+  (`dpm_suspend_noirq()` / `platform_suspend_prepare_late()`), before the AOSS entry;
+- with AC attached but `qcom_pmi8998_charger` unbound
+  (`.../drivers/qcom-pmi8998!pm660-charger/unbind`), `pm_test=platform` passes — the hang is in
+  that driver's PM path.  The driver only has `.resume` and
+  `dev_pm_set_wake_irq(chip->dev, cable_irq)`; the device has no `power/wakeup` attribute, so
+  the wake IRQ cannot be disabled from userspace and the next step is a kernel build without
+  that call.
+
+Until that is fixed, `nabu-power` ships `bin/nabu-mem-sleep` plus
+`config/60-nabu-mem-sleep.rules`: `s2idle` while a charger is online, `deep` on battery
+(verified: unplug → `s2idle [deep]`, plug → `[s2idle] deep`, driven by the udev event).  AC has
+no standby budget, and the battery path keeps the measured ~1 %/h.
+
+
 Deep sleep works, but the tablet still loses about **1.1-1.5 %/h** on battery
 where Android loses about **0.125 %/h** (the user measured 1 % over 8 h).  At
 8720 mAh that is ~100 mA versus Android's ~11 mA.

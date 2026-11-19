@@ -1620,12 +1620,26 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
 - **待验证**：重建/替换单元并重新 `enable` 后，亮屏按电源键休眠 → 唤醒，确认不再卡死。
 - **2026-11-19 复测（部分结论）**：hook 顺序已正确 —— 日志里
   `Finished nabu-sensors-suspend.service` 出现在 `Reached target sleep.target` 与
-  `systemd-suspend.service` **之前**，不再与挂起并发 ✓；**但整机仍会重启**：
+  `systemd-suspend.service` **之前**，不再与挂起并发 ✓；**但整机仍会重启/卡死**：
   日志停在 `PM: suspend entry (deep)`，之后没有 resume 输出，pstore 为空，
-  约 1 分钟后以新 boot 起来。当天 3 次（16:58、17:09、17:09）**全部是插着充电器的
-  空闲会话**；此前整夜 1 %/h 的深睡测量是**电池供电**下做的 ✓。
-  因此“插着充电器挂起 → 重启”是待查的新现象（下一次要做的：`echo mem > /sys/power/state`
-  对照、拔掉充电器复测、以及 `pm_test` 逐级定位），与 2.5 的 hook 并发问题不是同一件事。
+  要么自己重启、要么必须长按电源 15 秒。当天 5 次（16:58、17:09×2、18:23、18:37）
+  **全部是插着充电器的空闲会话** ✓。
+- **定位（2026-11-19，`pm_test` + 解绑驱动）**：
+  1. `echo devices > /sys/power/pm_test` → 设备 suspend/resume 干净通过
+     （suspend 304 ms / resume 419 ms）⇒ 所有驱动的 suspend/resume 回调正常 ✓；
+  2. `echo platform > /sys/power/pm_test`：**电池下 rc=0** ✓，**插充电器时卡死** ✗
+     ⇒ 问题在 noirq 阶段（`dpm_suspend_noirq()` / `platform_suspend_prepare_late()` 之后），
+     与“真正进入 AOSS”无关；
+  3. 插着充电器但**解绑充电器驱动**
+     （`echo c440000.spmi:pmic@2:charger@1000 > '/sys/bus/platform/drivers/qcom-pmi8998!pm660-charger/unbind'`）
+     后 `pm_test=platform` **通过** ⇒ 卡死点在 **`qcom_pmi8998_charger` 的 PM 路径**里 ✗。
+     该驱动只有 `.resume` 和 `dev_pm_set_wake_irq(chip->dev, cable_irq)` 两处与 PM 相关，
+     而 `power/wakeup` 在这台机器上不存在，无法从用户空间关掉，验证需要重编内核。
+  - 注意：解绑后再 bind 会失败（probe 卡住，load 8+），只能重启恢复。
+- **临时规避（2026-11-19，`nabu-power` `bin/nabu-mem-sleep` + `60-nabu-mem-sleep.rules`）**：
+  按充电器状态自动选睡眠模式 —— **AC → `s2idle`、电池 → `deep`** ✓。
+  实测：拔掉 → `s2idle [deep]`、插回 → `[s2idle] deep`，均由 udev 事件自动完成 ✓。
+  AC 用 s2idle 不损失待机收益（插电时不需要省电），电池仍保持 ~1 %/h ✓。
 
 ### 2.6 USB 控制器的 runtime PM 属于内核层，不再用 udev 规则规避（2026-10-27）
 - **旧做法**：`nabu-power/config/99-nabu-runtime-pm.rules` 把 `a600000.usb`（Type-C 的
