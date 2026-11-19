@@ -133,7 +133,7 @@ model name	: Qualcomm Snapdragon 860 (SM8150-AC)
 |---|---|
 | Touch (NT36523 SPI) | works: firmware loads, `NVTCapacitiveTouchScreen` + pen |
 | Audio (WCD934x + CS35L41 + ADSP) | works: card 0 "Xiaomi Pad 5", speakers play |
-| Charging (qcom_pmi8998/smb2 + LN8000) | 5 V charging at ~2.3 A / 10 W into the pack with a DCP charger; the charge pump is opt-in (`cp_enable`) — see below |
+| Charging (qcom_pmi8998/smb2 + LN8000) | 5 V charging at ~2.5-3 A / 12 W into the pack with a DCP charger, also right after a fresh plug (`ICL_STATUS` latch fix 2026-11-19); the charge pump is opt-in (`cp_enable`) — see below |
 | WiFi / SSH | works |
 | Fast charge | the pump correctly reports `adapter did not take 9V` for a non-QC charger; needs a QC3 adapter to verify |
 | iris decode (H.264/HEVC) | works: 4K H.264 uses 0.9 s CPU vs 18.5 s software, HEVC 1080p 0.47 s; iris IRQ counts confirm the VPU does the work. VA-API (`vpu_drv_video.so`) opens `/dev/video0` "Iris Decoder" and drives the same path |
@@ -175,6 +175,43 @@ Fixes in `nabu-power`/`qcom_pmi8998_charger.c`:
 
 Verified on `6.18.59-nabu-full`: three suspend/resume cycles with the charger
 attached keep `current_max = 3 A` and +2.3…2.5 A into the pack (≈10 W).
+
+### Charging: the input limit is latched on a fresh plug (fixed 2026-11-19)
+
+Re-plugging the adapter left the tablet *discharging while reporting
+"Charging"*, while a reboot with the same adapter charged at +2.5 A.  Registers
+(`/sys/devices/.../charger@1000/chg_regs`) showed why:
+
+| case | `APSD_RESULT` | `ICL_STATUS` (applied) | request |
+|---|---|---|---|
+| cable at boot | `0x48` (latch bit 7 set) | 3000 mA | 3000 mA |
+| fresh replug | `0x08` (latch clear) | **100 mA** | 3000 mA |
+
+`ICL_OVERRIDE_AFTER_APSD` only latches the software limit at the moment APSD
+completes.  On the boot path the SMB5 SDP-retry loop re-runs APSD *after* the
+ICL is programmed, so the latch lands; a fresh plug is classified as DCP once
+and never latches, and the buck then runs on the 100 mA USB default.  Disabling
+AICL and rewriting the limit does not change it, and re-running APSD never
+completes for an already attached adapter (four attempts, no DTC status).
+
+Fix in `nabu-power`/`qcom_pmi8998_charger.c`:
+
+- set `CMD_ICL_OVERRIDE` bit 0 (the vendor's software ICL override) after
+  programming a >500 mA limit, so the hardware uses that value;
+- unsuspend USBIN (`USBIN_CMD_IL`) after programming the ICL, as the vendor
+  does;
+- enable `USBIN_AICL_RERUN_EN_BIT`, which the vendor SMB5 setup sets and this
+  driver only configured the 12 s rerun *time* for;
+- the fake-charging watchdog now re-applies the ICL instead of re-running APSD;
+- new debug attributes `chg_regs`, `aicl` and `icl_ua` (this is the `debug`
+  product) — `chg_regs` prints requested vs applied limit, `POWER_PATH` and the
+  APSD result, which is what identified the latch.
+
+Verified on `6.18.59-nabu-full-debug-5b3ac10e`: a fresh replug with no manual
+action gives `APSD_RESULT=0x08`, `ICL_STATUS=2600 mA`, `POWER_PATH=0x95`
+(`use_usbin=1 valid_src=1`) and +1.8 A into the pack (95 %, tapering); the same
+plug before the change was 100 mA and -825 mA.  Cable at boot still gives
+3000 mA / +2.55 A.
 
 ### Auto-brightness (GNOME's own, standard interfaces)
 

@@ -1618,6 +1618,14 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   `systemd-suspend.service` 之前**跑完**；`nabu-sensors-resume.service` 保持
   `After=suspend.target`/`WantedBy=suspend.target`（恢复之后）。
 - **待验证**：重建/替换单元并重新 `enable` 后，亮屏按电源键休眠 → 唤醒，确认不再卡死。
+- **2026-11-19 复测（部分结论）**：hook 顺序已正确 —— 日志里
+  `Finished nabu-sensors-suspend.service` 出现在 `Reached target sleep.target` 与
+  `systemd-suspend.service` **之前**，不再与挂起并发 ✓；**但整机仍会重启**：
+  日志停在 `PM: suspend entry (deep)`，之后没有 resume 输出，pstore 为空，
+  约 1 分钟后以新 boot 起来。当天 3 次（16:58、17:09、17:09）**全部是插着充电器的
+  空闲会话**；此前整夜 1 %/h 的深睡测量是**电池供电**下做的 ✓。
+  因此“插着充电器挂起 → 重启”是待查的新现象（下一次要做的：`echo mem > /sys/power/state`
+  对照、拔掉充电器复测、以及 `pm_test` 逐级定位），与 2.5 的 hook 并发问题不是同一件事。
 
 ### 2.6 USB 控制器的 runtime PM 属于内核层，不再用 udev 规则规避（2026-10-27）
 - **旧做法**：`nabu-power/config/99-nabu-runtime-pm.rules` 把 `a600000.usb`（Type-C 的
@@ -1807,6 +1815,41 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   - 更低电量时抓到 **2.99 A** 峰值 ✓
   - ≥90%：不起泵 ✓，回到 5 V 充电（+1.37 A）✓
   - 全程 40 秒以上稳定，无掉泵、无过温、无 VBUS 越界 ✓
+
+### 2.5.4 插拔后 ICL 未锁存 → 100 mA “假充电”（2026-11-19，已修 `nabu-power 4d35bea`）
+- **现象**：**每次重新插拔**充电器后 `status=Charging`、`usb_type=DCP`、`VBUS 4.99 V`，
+  但电池电流 **−0.32 ~ −0.83 A**（净放电）✗；重启（充电器已插着）又变成 +2.5 A ✓，
+  所以用户感觉“识别充电很慢 / 插上不充，过一会儿自己好了”。
+- **决定性寄存器证据**（新增 `chg_regs` 属性，SMB5 用 `icl_status_reg=0x107`、
+  `power_path_reg=0x10B`）：
+
+  | 场景 | `APSD_RESULT` | `ICL_STATUS`（实际） | `USBIN_ILIM`（请求） | 电池 |
+  |---|---|---|---|---|
+  | 开机时插着 | `0x48`（bit7 latch=1） | 3000 mA | 3000 mA | +2.5 A ✓ |
+  | 重新插拔 | `0x08`（bit7 latch=0） | **100 mA** | 3000 mA | **−825 mA** ✗ |
+  | AICL 关闭 + 重写 ICL | `0x08` | 100 mA | 3000 mA | −337 mA ✗ |
+
+  即：**硬件根本没采纳写进 `USBIN_CURRENT_LIMIT_CFG` 的 3 A**，跑的是 100 mA 的
+  USB 默认值；关掉 AICL 也一样 ⇒ 不是 AICL 塌陷，而是**软件 ICL 没有被 latching**。
+- **根因**：`ICL_OVERRIDE_AFTER_APSD` 只在 **APSD 完成的那一刻**把软件 ICL 锁存
+  （`APSD_RESULT` bit7 = `ICL_OVERRIDE_LATCH`）。开机路径上，SMB5 的 SDP 误判重试会
+  在 ICL 编程**之后**再跑一次 APSD ⇒ 锁存成功 ✓；而重新插拔是**一次分类就 DCP**，
+  没有第二次 APSD ⇒ 锁存永远不出现 ✗。**重跑 APSD 也救不回来**：适配器已插着时
+  APSD 周期不再完成（实测 4 次都没有 DTC 状态）✗。此前 2.5.2 按 vendor 写
+  “>500 mA 清 `CMD_ICL_OVERRIDE`”，只在上面那条重试路径成立，单独插拔时不成立。
+- **修复**：
+  1. `smb2_set_current_limit()` 在 >500 mA 路径写 **`CMD_ICL_OVERRIDE` bit0 = 1**
+     （vendor 的软件 ICL 覆盖）⇒ 硬件直接使用 `USBIN_CURRENT_LIMIT_CFG` ✓；
+  2. 编程 ICL 后清 **`USBIN_CMD_IL` suspend**（vendor 同样顺序）✓；
+  3. 补上 **`USBIN_AICL_RERUN_EN_BIT`**（bit4，vendor SMB5 默认开；此前只写了 12 s
+     重跑时间却没使能位）✓；
+  4. `fake charging` 看门狗（`jeita_work`，15 s 轮询）改为**重写 ICL** 而不是重跑 APSD ✓；
+  5. 调试属性：`chg_regs`（请求/实际限流、POWER_PATH、APSD）、`aicl`、`icl_ua` ✓。
+- **实测**（`6.18.59-nabu-full-debug-5b3ac10e`）：
+  - 重新插拔、**不做任何手工操作**：`APSD_RESULT=0x08`（仍无锁存）、
+    `ICL_STATUS=0x34`（2600 mA）、`POWER_PATH=0x95`（use_usbin=1 valid_src=1）、
+    电池 **+1814 mA** ✓；修前同一动作是 100 mA / −825 mA ✗。
+  - 开机时插着：`ICL_STATUS=0x3c`（3000 mA）、电池 **+2.55 A** ✓，与修前一致（无回归）✓。
 
 ### 2.6.0 Type-C host 已打通（2026-10-28，手工切换）
 - **根因（两个，都在 `nabu-power` `ba7bf92` 修好）**：
