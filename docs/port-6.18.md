@@ -952,6 +952,24 @@ rebooted the tablet and the `oops` partition was still all zeroes. UFS has no
 The `PSTORE` frontend and the config options stay (so `/sys/fs/pstore` exists if
 a future boot chain ever keeps RAM), but no backend is enabled.
 
+## Samsung UFS runtime quirks (2026-11-20)
+
+Pad 5 units with a Samsung `KLUEG8UHDC-B0E1` UFS silently corrupt data on mainline: every boot and
+under heavy writes the controller logs `OCS invalid from controller` / `saved_uic_err 0x2`, the
+error handler recovers, ext4 sees nothing, and the files written in those windows contain zeros
+(reported on the nabu-main tracker with flatpak objects and zip files failing `unzip -t`).  The same
+part also cannot hold the link at HS-G4.
+
+The vendor is only known after the UFS descriptors are read, so `nabu-platform` carries
+`drivers/ufs/host/ufs-qcom.c` as an overlay and applies the mitigation in
+`ufs_qcom_apply_dev_quirks()` (before the max-gear switch), only for
+`UFS_VENDOR_SAMSUNG`: cap at HS-G3, clear `UFSHCD_CAP_RPM_AUTOSUSPEND`, and wait 200 us before
+gating the device reference clock after hibern8 enter.  Other vendors keep HS-G4 and runtime PM.
+
+Verified on the KIOXIA unit (`THGJFGT2T85BAIRB`, `6.18.59-nabu-full-416bd940`): no cap message, no
+UFS errors in dmesg, 766 MB/s direct reads.  The clock reduction (300 -> 201.5 MHz) is not applied
+yet; it is the remaining candidate if the Samsung unit still logs OCS errors.
+
 ## Camera (first light 2026-11-17/18)
 
 The `nabu-camera` module now builds on 6.18 and is part of the `debug` product.

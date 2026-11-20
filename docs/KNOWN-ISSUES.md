@@ -2085,6 +2085,36 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
 
 ---
 
+## 2.7 三星 UFS（KLUEG8UHDC）静默数据损坏（2026-11-20，已加运行时规避）
+
+- **现象（`nabu-main` issue #1，6.14.11-nabu-full 实机）**：三星
+  `KLUEG8UHDC-B0E1`（256 GB，fw 0200）的机器每次启动和大量写入时刷
+  `OCS invalid from controller for tag 22`、`saved_err 0x4 saved_uic_err 0x2`、
+  `devfreq ... dvfs failed (-16)`，错误处理能恢复、**ext4 完全无感知**，但那段时间写入的
+  文件被**静默写成零**（flatpak object 里出现 NUL、`unzip -t` 失败、git pack 损坏）；
+  同一颗粒还**无法在 HS-G4 保持链路**（`saved_uic_err 0x46`，只剩 well-known LUN，
+  根设备不出现）。
+- **别人验证过的三条修复**（issue 里列出，未 bisect 哪条必需）：
+  1. `&ufs_mem_hc` 的 `freq-table-hz` core/unipro **300 → 201.5 MHz**（TheMojoMan
+     `0001-HACK-slow-down-ufs.patch`）；
+  2. `ufs_qcom_dev_ref_clk_ctrl()` 的 ref-clk 等待 **1 → 200 µs**（Xiaomi downstream；
+     SenemOS `b9ace22d6`）；
+  3. 通过 DT 标志清 `UFSHCD_CAP_RPM_AUTOSUSPEND`，**禁用 UFS runtime PM**
+     （SenemOS `95155fba7`）。
+- **我们的实现（运行时不靠 DT 一刀切）**：`nabu-platform` 以 overlay 形式带
+  `drivers/ufs/host/ufs-qcom.c`（6.18.59 原文件 + 改动），在
+  `ufs_qcom_apply_dev_quirks()` 里**按厂商判断**（此时描述符已读、尚未切最高档）：
+  - `UFS_VENDOR_SAMSUNG` → 链路卡 **HS-G3**、清 `UFSHCD_CAP_RPM_AUTOSUSPEND`、
+    hibern8 后 ref-clk 等待 200 µs，并打印
+    `Samsung UFS <model>: capping at HS-G3, runtime PM off`；
+  - 其它厂商（KIOXIA/SK Hynix/Micron）**完全不变**：HS-G4 + runtime PM ✓。
+  第 1 条（降时钟）暂未做：devfreq 的 OPP 来自 DT，运行时按厂商限制需要改时钟路径；
+  若三星机器加完上面三条仍有 OCS 错误，再补这一条。
+- **实测（KIOXIA `THGJFGT2T85BAIRB`，`4.16bd940` 内核）**：无 `Samsung UFS` 限制日志、
+  `dmesg` 无任何 UFS 错误、`dd iflag=direct` 直读 **766 MB/s** ✓（非三星路径未受影响）。
+  三星机器待验证：应出现限制日志、`/sys/block/sda/device/vendor` 为 SAMSUNG、
+  且压力写入后 `dmesg` 无 `OCS invalid` ✓。
+
 ## 3. 音频（P0/P2）
 
 ### 3.1 启动偶发无声卡：SLIM NGD QMI 超时（P0，根因已定位，修复待多次重启确认）
