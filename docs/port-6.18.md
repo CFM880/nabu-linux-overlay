@@ -158,11 +158,29 @@ model name	: Qualcomm Snapdragon 860 (SM8150-AC)
 | Touch (NT36523 SPI) | works: firmware loads, `NVTCapacitiveTouchScreen` + pen |
 | Audio (WCD934x + CS35L41 + ADSP) | works: card 0 "Xiaomi Pad 5", speakers play |
 | Charging (qcom_pmi8998/smb2 + LN8000) | 5 V charging at ~2.5-3 A / 12 W into the pack with a DCP charger, also right after a fresh plug (`ICL_STATUS` latch fix 2026-11-19); the charge pump is opt-in (`cp_enable`) — see below |
-| WiFi / SSH | works |
+| WiFi / SSH | works; the WCN3990 has no burned-in MAC, so `nabu-platform` derives a stable per-device one from the SoC serial (2026-11-20) |
 | Fast charge | the pump correctly reports `adapter did not take 9V` for a non-QC charger; needs a QC3 adapter to verify |
 | iris decode (H.264/HEVC) | works: 4K H.264 uses 0.9 s CPU vs 18.5 s software, HEVC 1080p 0.47 s; iris IRQ counts confirm the VPU does the work. VA-API (`vpu_drv_video.so`) opens `/dev/video0` "Iris Decoder" and drives the same path |
 | Sensors (SSC/SNOC via SLPI) | works: accelerator, gyro, magnetometer, ambient light; GNOME auto-rotates. Required adding the SLPI protection domains to the sm8150 table in qcom_pd_mapper (see below) |
 | suspend/wake | works: s2idle and, since 2026-11-11, platform `mem` (AOSS deep sleep, power key wakes it) — see below |
+
+### WiFi MAC (per device, 2026-11-20)
+
+The WCN3990 has no burned-in MAC: `ath10k_snoc` logs `invalid MAC address; choosing random` on
+every boot and the router hands out a new DHCP lease.  The image used to pin one constant address
+(`02:00:0c:79:07:42`) through NetworkManager, which is stable per tablet but makes every tablet
+flashed from the same image collide on one network.
+
+`nabu-platform` now ships `/usr/local/libexec/nabu-wifi-mac` plus
+`99-nabu-wifi-mac.rules`: on the net device's `add` event (before NetworkManager activates it)
+the script hashes the SoC serial (`/sys/devices/soc0/serial_number`, falling back to the DT
+`serial-number`, the net device `serial` and `machine-id`), takes six bytes and marks the first
+octet as a locally administered unicast address, then sets it with `ip link`.  NetworkManager
+only preserves it (`wifi.cloned-mac-address=preserve`) and keeps scan randomisation off.
+
+Verified on the tablet: `4e:17:49:13:01:b7` after the first boot and unchanged after a second one,
+with the lease staying `192.168.0.42`, while the driver's phy address kept changing
+(`0e:9d:e0:2b:90:1d` → `62:1f:48:00:fc:f8`) - the override, not the driver, is what sticks.
 
 ## Sensors
 
