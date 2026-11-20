@@ -2115,6 +2115,21 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   三星机器待验证：应出现限制日志、`/sys/block/sda/device/vendor` 为 SAMSUNG、
   且压力写入后 `dmesg` 无 `OCS invalid` ✓。
 
+### 2.8 vainfo 报 `vaInitialize failed`（2026-11-20，已修）
+
+- **现象（新镜像首次验证）**：直接跑 `vainfo` 报
+  `Trying to open .../dri/msm_drv_video.so` → `va_openDriver() returns -1` →
+  `vaInitialize failed with error code -1`；手工带 `LIBVA_DRIVER_NAME=vpu` 才正常。
+- **原因**：本板只装了 `vpu_drv_video.so`（Mesa 的 msm/freedreno VA-API 驱动驱动不了 VPU），
+  libva 默认按名字找 `msm_drv_video.so` 找不到就失败，应用全部退回软解 ✗。环境变量只在
+  iris 文档里手写，没有做成系统默认。
+- **修复**：`nabu-iris` 新增 `/usr/lib/environment.d/90-nabu-vaapi.conf`
+  （`LIBVA_DRIVER_NAME=vpu` + `VPU_PLATFORM=qcom-iris`），镜像构建同时把这两个值追加到
+  `/etc/environment`（覆盖 SSH/pam_env 会话）；镜像 `packages.list` 增加 `vainfo` 包，
+  便于开箱验证。
+- **实测**：新登录会话 `LIBVA_DRIVER_NAME=vpu`，裸 `vainfo` 输出
+  `vpu-vaapi: Qualcomm Iris stateful V4L2 M2M (qcom-iris) 0.2.0`，H.264/HEVC/VP9 profile 齐全 ✓。
+
 ## 3. 音频（P0/P2）
 
 ### 3.1 启动偶发无声卡：SLIM NGD QMI 超时（P0，根因已定位，修复待多次重启确认）
