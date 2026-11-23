@@ -224,6 +224,22 @@ Fixes in `nabu-power`/`qcom_pmi8998_charger.c`:
 Verified on `6.18.59-nabu-full`: three suspend/resume cycles with the charger
 attached keep `current_max = 3 A` and +2.3…2.5 A into the pack (≈10 W).
 
+### Power key wake from deep suspend (fixed 2026-11-23)
+
+The key sometimes failed to wake the tablet from platform `mem` suspend while the charger still
+did, in runs of consecutive failures followed by successes.  The PON interrupt is edge triggered,
+so a latch left from the press that requested the suspend can swallow the next edge and the SPMI
+summary never deasserts/asserts for the PDC (pin 1, proven by the charger wake; the USB PHY PDC
+pins stayed at 0).  A press landing inside the platform entry's 1.5 s acknowledgement window is
+consumed as the entry transient in the same way.
+
+`suspend_noirq` now re-arms the PON edge (mask + unmask) and returns -EBUSY when the key is
+already down, so the suspend is aborted instead of entering AOSS with the press about to be
+consumed; the duplicate `enable_irq_wake()` in `.suspend` (balanced by a single disable in
+`.resume`) is gone.  Verified on `6.18.64-nabu-full-b7aaeee5` on battery: five suspend/press
+rounds woke from the key every time (9-17 s), pwrkey IRQ count advancing, no aborted suspends;
+the same kernel failed three times in a row before the change.
+
 ### Charge pump auto-probe (2026-11-23)
 
 The pump is no longer manual-only.  It is probed once per plug session

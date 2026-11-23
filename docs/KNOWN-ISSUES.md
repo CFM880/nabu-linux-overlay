@@ -1657,6 +1657,24 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   （`PM: suspend entry (deep)` 19:57:25 → `PM: suspend exit` 19:57:37）；
   修前按一次屏幕仍黑 ✗。
 
+### 2.5.6 电源键偶尔唤不醒深睡（2026-11-23，已修 `nabu-platform`）
+
+- **现象**：同一内核，电池深睡后按电源键有时不醒（18:27、18:42、18:52 连续三次，
+  22 分钟 / 16 分钟不醒），但插/拔充电器一定能醒；19:34、19:35 又成功过。
+- **证据**：`pwrkey` 中断计数会增长（PMIC 的 PON 中断已使能，`PON_INT_EN=0x03`，bit0=KPDPWR）；
+  充电器唤醒时 PDC 的 USB PHY 引脚计数全 0 ⇒ 唤醒走的正是 SPMI summary → **PDC pin 1**，
+  与电源键同一条线，说明唤醒通路本身是好的。
+- **根因（两个竞态，均与充电代码无关）**：
+  1. PON 中断是**边沿触发**：发起挂起那次按键的 latch 若没清干净，下一次按键不产生新边沿，
+     summary 不拉高 → PDC 不醒；
+  2. 真实按键若落在挂起入口 1.5 s 的 ack 窗口里，会被当成入口瞬变消费掉。
+- **修复（`nabu-platform`）**：`suspend_noirq` 里先 `mask → unmask` 重新 arm PON 边沿，
+  并读 `PON_RT_STS`，按键已按下时返回 `-EBUSY` 中止挂起（不进 AOSS）；顺带修掉
+  `enable_irq_wake()` 在 `.suspend` 里调用两次、`.resume` 只关一次的不平衡。
+- **实测（`6.18.64-nabu-full-b7aaeee5`，电池）**：连续 5 轮"挂起 → 10 秒后按键"全部唤醒，
+  entry→exit 分别为 9 / 11 / 15 / 17 秒（另一轮按得晚），`pwrkey` 计数递增，
+  没有 `-EBUSY` 误中止；修复前同内核连续 3 次失败。
+
 ### 2.6 USB 控制器的 runtime PM 属于内核层，不再用 udev 规则规避（2026-10-27）
 - **旧做法**：`nabu-power/config/99-nabu-runtime-pm.rules` 把 `a600000.usb`（Type-C 的
   dwc3）、`a800000.usb`（键盘盖）、`xhci-hcd.*.auto` 的 `power/control` 改成 `auto`。
