@@ -2160,7 +2160,10 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   3. 要真正做对必须在识别厂商后强制一次 `hba_stop` + `hba_enable` 重新初始化 PHY，
      侵入性大且**没有三星机器可验证**，失败即不识别存储。
 - **当前状态**：DTS 无 `limit-hs-gear` / `limit-gear-rate`；KIOXIA 走 `HS_GEAR4 / HS_RATE_B`，
-  三星颗粒由 overlay 运行时降到 **G3**（链路约 -40%，但已验证可用）。
+  三星颗粒由 overlay 运行时降到 **G3**（链路约 -40%，但已验证可用）。回退后已在平板实测
+  （`6.18.64-nabu-full-2259be61`）：`HS_GEAR4 / HS_RATE_B`，1 GiB 直读 0.79 s ≈ **1.4 GB/s**
+  （重启后前几次会因后台活动波动到 0.8–1.3 GB/s，稳定值即基线），`OCS invalid`/`saved_uic_err`
+  0 条，failed units 0，传感器 `AccelerometerOrientation = right-up` 正常。
 
 ## 3. 音频（P0/P2）
 

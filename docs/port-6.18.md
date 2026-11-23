@@ -985,7 +985,9 @@ to the affected units at runtime - `host_params->hs_rate` is consumed by
 `ufs_qcom_power_up_sequence()` when the PHY is powered on, before the device descriptor
 identifies the vendor, and the `REINIT_AFTER_MAX_GEAR_SWITCH` quirk is cleared when `phy_gear`
 matches the negotiated gear, so the PHY is never reprogrammed for Rate A afterwards.  The board
-is back to HS-G4 Rate B with the runtime HS-G3 cap for Samsung parts.
+is back to HS-G4 Rate B with the runtime HS-G3 cap for Samsung parts.  Verified after the revert on
+the tablet (`6.18.64-nabu-full-2259be61`, the same content hash as before Rate A was tried):
+`HS_GEAR4 / HS_RATE_B`, 0.79 s per GiB direct read (~1.4 GB/s), zero OCS/uic errors.
 
 ## Camera (first light 2026-11-17/18)
 
