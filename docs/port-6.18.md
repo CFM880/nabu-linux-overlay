@@ -189,6 +189,12 @@ initialization") and `ssccli` never received data.  `qcom_pd_mapper` advertises
 the SLPI domains for sdm845/sm8250/sm6115 but not for sm8150, although it is the
 same SLPI with instance 90, so `msm/slpi/root_pd` was never announced:
 fastrpc's PDR lookup failed with -ENXIO and the sensor PD could not attach.
+The overlay also carries the sensor protection-domain attach wait and the
+SDSP IOVA alias workaround in `drivers/misc/fastrpc.c`; it was re-merged onto
+6.18.64 (the `dma_addr_t` rename and the `fastrpc_map_attach()` double-free fix)
+and re-verified there (`SensorProxy.HasAccelerometer=true`,
+`AccelerometerOrientation=right-up`, camera capture unaffected).
+
 Adding `&slpi_root_pd` and `&slpi_sensor_pd` to `sm8150_domains[]`
 (overlay of `drivers/soc/qcom/qcom_pd_mapper.c` in
 `nabu-accelerometer/kernel-overlay/`) fixes it: no more
