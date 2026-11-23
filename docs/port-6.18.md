@@ -237,9 +237,11 @@ command line restores the manual behaviour):
   the work retries every 5 s (max 30) while either is missing;
 - a failed attempt still goes through `smb2_cp_restore_5v()` (HVDCP off, DCP
   3 A restored, APSD re-run) and latches `cp_failed`;
-- a monitor or taper stop latches it as well, and resume only clears it for a
-  pump that was running, so an idle 5 V session does not probe again on every
-  wake; only a replug clears it;
+- a taper or a failed handshake latches it; a full-battery (>=92 %) or
+  over-temperature stop does not - those are temporary, so the probe comes back
+  after 5 minutes and the pump can resume when the battery drops below 90 % or
+  the pack cools, without a replug.  Resume only clears the latch for a pump
+  that was running, so an idle 5 V session does not probe again on every wake;
 - `cp_force` (debug) skips the capacity/temperature gates.
 
 Measured on `6.18.64-nabu-full-3c23b0fe` with the adapter attached at 100 %:
@@ -253,7 +255,10 @@ battery keeps charging at +0.7…0.9 A, with no second attempt (four probes).
 The 9 V handshake of that particular adapter is not reliable across attempts
 (it answered once, then stayed at 5 V), which is exactly the case the
 once-per-plug rule handles: fast charge needs a replug, the 5 V path keeps
-working.
+working.  The same adapter refused every handshake on the
+`6.18.64-nabu-full-46d0b86f` boot, so the full-battery stop and its 5 minute
+re-probe were not exercised on hardware - that part stays untested until a
+reliable QC adapter is available.
 
 ### Charging: the input limit is latched on a fresh plug (fixed 2026-11-19)
 
