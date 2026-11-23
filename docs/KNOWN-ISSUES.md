@@ -2130,6 +2130,33 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
 - **实测**：新登录会话 `LIBVA_DRIVER_NAME=vpu`，裸 `vainfo` 输出
   `vpu-vaapi: Qualcomm Iris stateful V4L2 M2M (qcom-iris) 0.2.0`，H.264/HEVC/VP9 profile 齐全 ✓。
 
+### 2.7.1 更优解：HS-G4 Rate A（2026-11-23 记录，暂未采用）
+
+- **来源**：overcast302 在 `KLUDG4UHDC-B0E1` 上发现，问题不是“跑不了 G4”，而是主线按
+  **HS-G4 Rate B**（约 11.64 Gbps/lane）协商，而部分三星颗粒只能跑 **Rate A**
+  （约 9.98 Gbps/lane）。改成 Rate A 后链路稳定、根设备正常出现。
+  提交：<https://github.com/overcast302/linux/commit/decfa053edb19852572a84ead04200f7a3e54928>
+  ```diff
+   &ufs_mem_hc {
+  -	limit-hs-gear = <3>;
+  +	limit-hs-gear = <4>;
+  +	limit-gear-rate = "rate-a";
+  ```
+- **内核已支持**：`ufshcd_parse_gear_limits()`（`drivers/ufs/host/ufshcd-pltfrm.c`）解析
+  `limit-hs-gear` 与 `limit-gear-rate`（`rate-a`/`rate-b`，绑定默认 `rate-b`），无需改驱动。
+- **当前状态（未采用）**：我们的 DTS 没有这两个属性 → SM8150 控制器上限 G4、速率默认 B；
+  三星机器靠 overlay 里的**运行时 G3 上限**规避。
+- **本机实测基线（`6.18.64-nabu-full-0e304596`，KIOXIA `THGJFGT2T85BAIRB`）**：
+  `power_info` 在读取时协商 **`HS_GEAR4 / HS_RATE_B`**、2 lane（空闲会掉到 G1，动态调档）；
+  `dd iflag=direct` 直读 1 GiB = **820 MB/s**。G4B 链路理论上限 ~2.9 GB/s、G4A ~2.5 GB/s，
+  实测 820 MB/s 的瓶颈不在链路 ⇒ **换 Rate A 对本机预计无可见影响**，而三星从 G3 提到 G4A
+  链路带宽约 +70%。
+- **若采用需同步做两点**：① DTS 加上面两行；② 删掉 `ufs-qcom.c` overlay 里三星的
+  **G3 上限**（否则会把 G4A 又压回 G3），但**保留** `UFSHCD_CAP_RPM_AUTOSUSPEND` 关闭与
+  ref-clk 200 µs——那两条针对的是静默损坏（`OCS invalid`），与速率无关。
+- **暂不采用的原因**：本机是 KIOXIA，无法就地验证三星颗粒；需三星机器刷镜像实测
+  `OCS invalid` 是否消失后再切换。
+
 ## 3. 音频（P0/P2）
 
 ### 3.1 启动偶发无声卡：SLIM NGD QMI 超时（P0，根因已定位，修复待多次重启确认）

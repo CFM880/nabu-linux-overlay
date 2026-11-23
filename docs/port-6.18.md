@@ -970,6 +970,15 @@ Verified on the KIOXIA unit (`THGJFGT2T85BAIRB`, `6.18.59-nabu-full-416bd940`): 
 UFS errors in dmesg, 766 MB/s direct reads.  The clock reduction (300 -> 201.5 MHz) is not applied
 yet; it is the remaining candidate if the Samsung unit still logs OCS errors.
 
+A better fix is on the table but not adopted yet (2026-11-23): mainline negotiates **HS-G4 Rate B**
+(11.64 Gbps/lane) and some Samsung parts only hold **Rate A** (9.98 Gbps/lane).  Forcing
+`limit-hs-gear = <4>` + `limit-gear-rate = "rate-a"` in the DTS - both already parsed by
+`ufshcd_parse_gear_limits()` - would let those parts run G4A instead of the G3 cap.  Measured on
+the KIOXIA unit (`6.18.64-nabu-full-0e304596`): link negotiates `HS_GEAR4 / HS_RATE_B`, 2 lanes
+(idle drops to G1), 820 MB/s direct reads - far below the ~2.9 GB/s link ceiling, so Rate A should
+not change it, while Samsung units would gain ~70 % link bandwidth.  Adopting it means dropping
+the runtime G3 cap from the ufs-qcom overlay but keeping the runtime-PM and ref-clock quirks.
+
 ## Camera (first light 2026-11-17/18)
 
 The `nabu-camera` module now builds on 6.18 and is part of the `debug` product.
