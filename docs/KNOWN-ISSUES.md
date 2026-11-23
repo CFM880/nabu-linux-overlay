@@ -2130,29 +2130,37 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
 - **实测**：新登录会话 `LIBVA_DRIVER_NAME=vpu`，裸 `vainfo` 输出
   `vpu-vaapi: Qualcomm Iris stateful V4L2 M2M (qcom-iris) 0.2.0`，H.264/HEVC/VP9 profile 齐全 ✓。
 
-### 2.7.1 采用 HS-G4 Rate A（2026-11-23）
+### 2.7.1 HS-G4 Rate A：试过并已回退（2026-11-23）
 
 - **来源**：overcast302 在 `KLUDG4UHDC-B0E1` 上发现，问题不是“跑不了 G4”，而是主线按
   **HS-G4 Rate B**（约 11.64 Gbps/lane）协商，而部分三星颗粒只能跑 **Rate A**
-  （约 9.98 Gbps/lane）。改成 Rate A 后链路稳定、根设备正常出现。
-  提交：<https://github.com/overcast302/linux/commit/decfa053edb19852572a84ead04200f7a3e54928>
-- **实现（`nabu-platform`，已采用）**：
-  - DTS `&ufs_mem_hc` 增加 `limit-hs-gear = <4>; limit-gear-rate = "rate-a";`
-    （`ufshcd_parse_gear_limits()` 解析，无需改驱动）；
-  - overlay 里删掉三星的**运行时 G3 上限**，**保留** `UFSHCD_CAP_RPM_AUTOSUSPEND` 关闭与
-    ref-clk 200 µs——这两条针对静默损坏（`OCS invalid`），与速率无关。
+  （约 9.98 Gbps/lane）。提交：
+  <https://github.com/overcast302/linux/commit/decfa053edb19852572a84ead04200f7a3e54928>
+- **试过的实现（`nabu-platform` 5046027，已回退）**：DTS `&ufs_mem_hc` 加
+  `limit-hs-gear = <4>; limit-gear-rate = "rate-a";`（`ufshcd_parse_gear_limits()` 解析），
+  并删掉 overlay 里三星的运行时 G3 上限（`UFSHCD_CAP_RPM_AUTOSUSPEND` 关闭与 ref-clk
+  200 µs 保留）。
 - **实测（KIOXIA `THGJFGT2T85BAIRB`，`6.18.64-nabu-full-d5bfcd63`，稳定后 3 次）**：
 
   | 配置 | `power_info` | 1 GiB `dd iflag=direct` |
   |---|---|---|
-  | G4 **Rate B**（改前） | `HS_GEAR4 / HS_RATE_B` | 0.77–0.79 s ≈ **1.37 GB/s** |
-  | G4 **Rate A**（改后） | `HS_GEAR4 / HS_RATE_A` | 0.86–0.88 s ≈ **1.24 GB/s** |
+  | G4 **Rate B** | `HS_GEAR4 / HS_RATE_B` | 0.77–0.79 s ≈ **1.37 GB/s** |
+  | G4 **Rate A** | `HS_GEAR4 / HS_RATE_A` | 0.86–0.88 s ≈ **1.24 GB/s** |
 
-  顺序读下降约 **10%**，与链路速率比 9.98/11.64≈0.86 一致；`OCS invalid`/`saved_uic_err` 0 条，
-  failed units 0。每次重启后第一次测量会低到 ~0.74 GB/s（冷状态），比较时取稳定值。
-- **待验证**：三星机器刷含此改动的镜像后，确认 `dmesg` 无 `OCS invalid`、且链路为
-  `HS_GEAR4 / HS_RATE_A`。若三星侧仍异常，可回退为 G3 方案（DTS 改回 `limit-hs-gear = <3>`
-  并在 overlay 恢复按厂商降档）。
+  顺序读下降约 **10%**（与 9.98/11.64≈0.86 一致），`OCS invalid`/`saved_uic_err` 0 条。
+  每次重启后第一次测量会低到 ~0.74 GB/s（冷状态），比较时取稳定值。
+- **回退原因（`nabu-platform` e0dc12c）**：
+  1. `limit-gear-rate` 是**全板生效**的，KIOXIA 白掉 10% 带宽，而三星侧尚未在硬件上验证；
+  2. 「只在三星上运行时切 A」做不到：`host_params->hs_rate` 在
+     `ufs_qcom_power_up_sequence()`（`hce_enable` 时）就被 QMP PHY 消费
+     （`PHY_MODE_UFS_HS_B` → `tbls_hs_b`），**那时还没读描述符、不知道厂商**；在
+     `apply_dev_quirks()` 里改只影响 PA 层请求，而
+     `UFSHCD_QUIRK_REINIT_AFTER_MAX_GEAR_SWITCH` 在 `phy_gear == 协商 gear` 时被清掉，
+     PHY 不会重配 → 结果是「Rate B 的 PHY 表 + Rate A 的链路」，未定义行为；
+  3. 要真正做对必须在识别厂商后强制一次 `hba_stop` + `hba_enable` 重新初始化 PHY，
+     侵入性大且**没有三星机器可验证**，失败即不识别存储。
+- **当前状态**：DTS 无 `limit-hs-gear` / `limit-gear-rate`；KIOXIA 走 `HS_GEAR4 / HS_RATE_B`，
+  三星颗粒由 overlay 运行时降到 **G3**（链路约 -40%，但已验证可用）。
 
 ## 3. 音频（P0/P2）
 

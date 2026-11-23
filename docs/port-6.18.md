@@ -977,15 +977,15 @@ UFS errors in dmesg, 766 MB/s direct reads.  The clock reduction (300 -> 201.5 M
 yet; it is the remaining candidate if the Samsung unit still logs OCS errors.
 
 Mainline negotiates **HS-G4 Rate B** (11.64 Gbps/lane), and some Samsung parts only hold
-**Rate A** (9.98 Gbps/lane).  The board now forces Rate A from DT -
-`limit-hs-gear = <4>` plus `limit-gear-rate = "rate-a"`, both parsed by
-`ufshcd_parse_gear_limits()` - instead of capping the gear at HS-G3; the overlay keeps only the
-Samsung data-integrity quirks (runtime PM off, 200 us reference-clock wait).
-
-Measured on the KIOXIA unit (`6.18.64-nabu-full-d5bfcd63`, warm runs): G4B 0.77-0.79 s per GiB
-direct read (~1.37 GB/s) versus G4A 0.86-0.88 s (~1.24 GB/s), i.e. about 10 % - the expected
-link-rate cost - with zero UFS errors.  Samsung units still have to confirm on hardware that their
-OCS errors disappear at Rate A.
+**Rate A** (9.98 Gbps/lane).  Forcing Rate A board-wide from DT
+(`limit-hs-gear = <4>` + `limit-gear-rate = "rate-a"`) was tried and reverted
+(`nabu-platform` 5046027 -> e0dc12c): it costs the KIOXIA unit about 10 % of sequential read
+(0.77-0.79 s -> 0.86-0.88 s per GiB direct read, ~1.37 -> ~1.24 GB/s), and it cannot be limited
+to the affected units at runtime - `host_params->hs_rate` is consumed by
+`ufs_qcom_power_up_sequence()` when the PHY is powered on, before the device descriptor
+identifies the vendor, and the `REINIT_AFTER_MAX_GEAR_SWITCH` quirk is cleared when `phy_gear`
+matches the negotiated gear, so the PHY is never reprogrammed for Rate A afterwards.  The board
+is back to HS-G4 Rate B with the runtime HS-G3 cap for Samsung parts.
 
 ## Camera (first light 2026-11-17/18)
 
