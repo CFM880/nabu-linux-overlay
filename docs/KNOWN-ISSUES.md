@@ -1674,6 +1674,16 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
 - **实测（`6.18.64-nabu-full-b7aaeee5`，电池）**：连续 5 轮"挂起 → 10 秒后按键"全部唤醒，
   entry→exit 分别为 9 / 11 / 15 / 17 秒（另一轮按得晚），`pwrkey` 计数递增，
   没有 `-EBUSY` 误中止；修复前同内核连续 3 次失败。
+- **插着充电器时仍不醒（2026-11-24，已规避）**：AC 深睡后按键唤醒依旧失败，SDAM 标记环
+  （`sdam@b100` 0x60..0x6f + 0x7e）给出完整序列：
+  `08`(PM_SUSPEND_PREPARE) `07`(.suspend) `41`(PON_INT_EN=1) `06`(suspend_noirq 完成)
+  `05`(按键 IRQ handler) `09`(resume)——**PMIC 已使能 PON 中断、按键也 latch 了，
+  但 SPMI summary → PDC pin 1 没有为它触发**（同一条线上充电器中断可以唤醒）。
+  这是 PMIC 在 AOSS 下对 PON 中断的 summary 门控，驱动层改不掉。
+- **规避（`nabu-power`）**：恢复 `nabu-mem-sleep` + `60-nabu-mem-sleep.rules`——插着充电器时
+  `mem_sleep` 切到 **s2idle**（按键 IRQ 直接唤醒 CPU，且插电无待机功耗压力），拔掉切回
+  **deep**（电池下按键唤醒 5/5 已验证）。实测 `5da292a7`：AC 下 `[s2idle]`，按一次即亮；
+  电池下保持 deep。
 
 ### 2.6 USB 控制器的 runtime PM 属于内核层，不再用 udev 规则规避（2026-10-27）
 - **旧做法**：`nabu-power/config/99-nabu-runtime-pm.rules` 把 `a600000.usb`（Type-C 的

@@ -240,6 +240,15 @@ consumed; the duplicate `enable_irq_wake()` in `.suspend` (balanced by a single 
 rounds woke from the key every time (9-17 s), pwrkey IRQ count advancing, no aborted suspends;
 the same kernel failed three times in a row before the change.
 
+With a charger attached the key still did not wake it.  The SDAM ring (`sdam@b100`, 0x60..0x6f
+plus 0x7e) recorded the whole sequence - 0x08 prepare, 0x07 `.suspend`, 0x40|PON_INT_EN (=0x41),
+0x06 noirq done, 0x05 key IRQ handler, 0x09 resume - so the PMIC had the PON interrupt enabled
+and the press latched, yet the SoC stayed asleep until the charger was unplugged: the SPMI
+summary/PDC path does not fire for that interrupt under AOSS, while the charger IRQ on the same
+line does.  That is PMIC/AOSS behaviour, not something the driver can fix, so the port picks the
+sleep mode from the charger state again (`nabu-power` `nabu-mem-sleep` + udev rule): s2idle on
+AC (the key IRQ wakes the CPU directly and AC has no standby budget), deep on battery.
+
 ### Charge pump auto-probe (2026-11-23)
 
 The pump is no longer manual-only.  It is probed once per plug session
