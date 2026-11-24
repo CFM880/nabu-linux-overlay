@@ -811,6 +811,20 @@ is back to HS-G4 Rate B with the runtime HS-G3 cap for Samsung parts.  Verified 
 the tablet (`6.18.64-nabu-full-2259be61`, the same content hash as before Rate A was tried):
 `HS_GEAR4 / HS_RATE_B`, 0.79 s per GiB direct read (~1.4 GB/s), zero OCS/uic errors.
 
+### Sensor proxy CPU spin (fixed 2026-11-24)
+
+`iio-sensor-proxy-ssc` pinned one core at 100%.  gdb showed the main thread in
+`ssc_common_wait_sync_context()` under `ssc_sensor_light_open_sync()`: libssc waited for the
+request with `g_main_context_iteration(default, FALSE)`, which returns immediately when the
+context has no event, so a request that never completes spins forever.  The light sensor itself
+worked (the proxy kept streaming lux), only the open reply never arrived.  The libssc patch
+iterates with `may_block=TRUE`; the service then sleeps between events.  Measured after the fix:
+state S, ~1.7% CPU instead of 100%, LightLevel and AccelerometerOrientation unchanged.
+
+The remaining ~1.7% is the 26 Hz accelerometer stream itself: perf attributes it to the QRTR send
+(`__qcom_glink_send`), protobuf decoding and GLib dispatch, about 0.6 ms per report.
+`nabu-tablet-mode` only listens for D-Bus property changes and never touches the stream.
+
 ## Camera (first light 2026-11-17/18)
 
 The `nabu-camera` module now builds on 6.18 and is part of the `debug` product.

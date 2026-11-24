@@ -2375,6 +2375,26 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
 
 ---
 
+### 7.1 `iio-sensor-proxy-ssc` 占满一个 CPU 核（2026-11-24，已修 `nabu-accelerometer`）
+
+- **现象**：`/usr/local/libexec/iio-sensor-proxy-ssc` 稳定 100% CPU（htop），传感器/旋转本身正常。
+- **定位**：gdb 附上主线程：
+  `ssc_common_wait_sync_context() <- ssc_sensor_light_open_sync()`。
+  libssc 的同步等待用 `g_main_context_iteration(default, FALSE)`（非阻塞）轮询，
+  某个请求（这里是环境光 open）永远不完成时就空转。光感数据本身正常
+  （`ssccli --sensor light` 读到 ~100 lux，代理的 `LightLevel` 也正常），
+  只是 open 的回复一直不来。
+- **修复**（`nabu-accelerometer` `patches/0006-libssc-blocking-sync-wait.patch`）：
+  把该轮询改成 `may_block=TRUE`，事件照常泵但线程在两次事件之间睡眠。
+- **实测**：替换 `libssc.so.2` 并重启服务后，进程状态 `S`，
+  utime 53→61 / 6 s（**~1.7%**，修复前 100%），`LightLevel` 与
+  `AccelerometerOrientation` 正常。
+- **剩余的 ~1.7% 是正常的传感器流开销**：perf 显示主要花在
+  `__qcom_glink_send`（每条上报的 QRTR 发送）、protobuf 解码和 GLib 派发上；
+  加速度计由 SLPI 以 **26 Hz** 上报（`ssccli --debug` 的 `sample-rate: 26.0 Hz`），
+  即每条 ~0.6 ms。`nabu-tablet-mode` 只监听 D-Bus 属性变化、不消费传感器流，
+  所以不能直接对比。要再降只能改上报率（libssc 目前只支持传感器声明的单一速率）。
+
 ## 8. 显示 / HDR（P1，已记录：显示链路可用、无 HDR 通路）
 
 - **硬件**：CSOT `xiaomi,nabu-csot-nt36523`（Novatek NT36523），1600x2560@120Hz，
