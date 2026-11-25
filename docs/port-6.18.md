@@ -245,9 +245,16 @@ plus 0x7e) recorded the whole sequence - 0x08 prepare, 0x07 `.suspend`, 0x40|PON
 0x06 noirq done, 0x05 key IRQ handler, 0x09 resume - so the PMIC had the PON interrupt enabled
 and the press latched, yet the SoC stayed asleep until the charger was unplugged: the SPMI
 summary/PDC path does not fire for that interrupt under AOSS, while the charger IRQ on the same
-line does.  That is PMIC/AOSS behaviour, not something the driver can fix, so the port picks the
-sleep mode from the charger state again (`nabu-power` `nabu-mem-sleep` + udev rule): s2idle on
-AC (the key IRQ wakes the CPU directly and AC has no standby budget), deep on battery.
+line does.  That is PMIC/AOSS behaviour, not something the driver can fix.
+
+The PDC type write is now verified with a read-back (the vendor polls there too, and a lost write
+leaves the pin on its old type), which made AC+deep wake twice in a row, but the failure came back
+on battery and one round never resumed at all - the log stopped at `PM: suspend entry (deep)` and
+the tablet needed the 15 s reset.  s2idle has been reliable on AC and battery (the key IRQ wakes
+the CPU directly), so the port now defaults to it: `mem_sleep_default=s2idle` on the command line
+plus `nabu-power`'s `nabu-mem-sleep`/udev rule re-applying it.  The trade-off is standby drain
+(~1.5 %/h instead of ~0.1 %/h); `echo deep > /sys/power/mem_sleep` still selects deep for a boot
+at the risk of an occasional unwakeable suspend.
 
 ### Charge pump auto-probe (2026-11-23)
 
