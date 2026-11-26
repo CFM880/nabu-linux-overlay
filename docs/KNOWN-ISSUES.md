@@ -1683,10 +1683,13 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
 - **后续（2026-11-25）**：deep 下按键唤醒仍然是间歇性的（`30665e4e` 上 PDC 类型写入回读验证后
   AC+deep 成功 2 次，但电池+deep 有一轮 `PM: suspend entry (deep)` 后再没回来，需要长按 15 秒
   重启）。s2idle 在 AC 和电池下都稳定：`19:55:32 → 19:58:04`（电池、按键、无充电器事件）。
-- **规避（`nabu-power`/`nabu-main`）**：**默认改用 s2idle**——内核 cmdline 加
-  `mem_sleep_default=s2idle`，`nabu-mem-sleep` + udev 规则在电源事件后重新应用 s2idle。
-  代价是待机 ~1.5 %/h（deep 是 ~0.1 %/h）；需要长续航时可手动 `echo deep > /sys/power/mem_sleep`，
-  但接受"偶尔唤不醒/需 15 秒复位"的风险。
+- **规避（`nabu-power`，2026-11-26 定稿）**：按充电器状态选模式——**插电用 s2idle**
+  （按键 IRQ 直接唤醒 CPU，插电本就没有待机功耗压力，且充电时必须能唤醒），
+  **电池用 deep**（~0.1 %/h）。`nabu-mem-sleep` + `60-nabu-mem-sleep.rules` 在 USB
+  power supply 的 online 变化时切换，内核 cmdline 不加 `mem_sleep_default`（开机默认 deep，
+  插电时规则会在几秒内切到 s2idle）。
+  代价：电池 deep 下按键唤醒仍有间歇失败（插充电器可救，极端情况需长按 15 秒）；
+  只想要稳定唤醒时可手动 `echo s2idle > /sys/power/mem_sleep`。
 
 ### 2.6 USB 控制器的 runtime PM 属于内核层，不再用 udev 规则规避（2026-10-27）
 - **旧做法**：`nabu-power/config/99-nabu-runtime-pm.rules` 把 `a600000.usb`（Type-C 的
