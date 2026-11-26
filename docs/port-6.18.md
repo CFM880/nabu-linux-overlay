@@ -264,6 +264,15 @@ PDC enable banks from hardware at syscore suspend, and our equivalent read (move
 battery deep suspend - neither the key nor the charger woke the tablet and it needed the 15 s
 reset.  Only the verified type write is kept (`nabu-platform` 2b66137).
 
+What did fix it is the trigger type of the PMIC's PON interrupt: in edge mode a latched press does
+not always assert the SPMI summary, so the PDC never fires.  The driver now asks for
+`IRQ_TYPE_LEVEL_HIGH`; the line stays asserted for the whole press.  A level interrupt storms
+otherwise (the oneshot core unmasks it as soon as the handler returns while the line is high), so
+the handler stays in the thread and polls `PON_RT_STS` every 20 ms until release, then reports the
+release - the wake press is consumed by the existing swallow logic and held the same way.
+Measured on `6.18.64-nabu-full-ddb2eb1f` on battery: three suspend/press rounds woke from the key,
+one IRQ per press (down from thousands), and an awake press toggles the screen exactly once.
+
 ### Charge pump auto-probe (2026-11-23)
 
 The pump is no longer manual-only.  It is probed once per plug session

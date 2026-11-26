@@ -1697,6 +1697,15 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   结论一致——PDC 的 MMIO 在那个阶段已经不可访问，读操作会把总线 stall 住。该改动已丢弃，
   只保留"类型写入回读验证"（`2b66137`）。vendor 的做法在主线这条路径上**无法安全复刻**。
 
+- **最终修法（2026-11-26，`nabu-platform`）**：把 PMIC 的 **PON 中断从边沿改成电平**
+  （`IRQ_TYPE_LEVEL_HIGH`）。按住期间 SPMI summary 一直拉着，PDC 一定能看到唤醒请求。
+  电平触发会导致风暴（oneshot 核心在 handler 返回后立刻 unmask，电平仍高就再次触发），
+  所以 handler 改为**按住期间留在 oneshot 线程里**（每 20 ms 读一次 `PON_RT_STS`，最多 10 秒），
+  松开后补发 release；唤醒按键同样被吞掉并这样等待。
+- **实测（`6.18.64-nabu-full-ddb2eb1f`，电池 deep）**：连续 3 轮"挂起 → 按键"全部唤醒
+  （其中 2 轮 `usb-plugin` 无变化，确认是按键），`pwrkey` 中断每次按键只 +1（修复前 +2500），
+  清醒状态按一次只切换一次、无重复挂起、无卡顿。
+
 ### 2.6 USB 控制器的 runtime PM 属于内核层，不再用 udev 规则规避（2026-10-27）
 - **旧做法**：`nabu-power/config/99-nabu-runtime-pm.rules` 把 `a600000.usb`（Type-C 的
   dwc3）、`a800000.usb`（键盘盖）、`xhci-hcd.*.auto` 的 `power/control` 改成 `auto`。
