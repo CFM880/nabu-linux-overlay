@@ -1691,6 +1691,12 @@ overlay（`c137a27`）✓，只保留面板驱动 ✓。此前的 `core` 时钟�
   代价：电池 deep 下按键唤醒仍有间歇失败（插充电器可救，极端情况需长按 15 秒）；
   只想要稳定唤醒时可手动 `echo s2idle > /sys/power/mem_sleep`。
 
+- **试过但不可行（2026-11-26）**：想按 vendor 的 `CONFIG_QTI_PDC_SAVE_RESTORE` 从**硬件**读
+  PDC 使能位再于 resume 写回，把读取放在 pwrkey 的 `suspend_noirq`（以为此时 PDC 域还活着）。
+  结果第一次电池 deep 就挂死：**按键和充电器都无法唤醒**，只能长按 15 秒。与 `6b2d631` 时期的
+  结论一致——PDC 的 MMIO 在那个阶段已经不可访问，读操作会把总线 stall 住。该改动已丢弃，
+  只保留"类型写入回读验证"（`2b66137`）。vendor 的做法在主线这条路径上**无法安全复刻**。
+
 ### 2.6 USB 控制器的 runtime PM 属于内核层，不再用 udev 规则规避（2026-10-27）
 - **旧做法**：`nabu-power/config/99-nabu-runtime-pm.rules` 把 `a600000.usb`（Type-C 的
   dwc3）、`a800000.usb`（键盘盖）、`xhci-hcd.*.auto` 的 `power/control` 改成 `auto`。

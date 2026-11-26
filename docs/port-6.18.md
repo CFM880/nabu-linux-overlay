@@ -258,6 +258,12 @@ command line keeps the deepest default.  On battery the key wake can still fail 
 charger recovers, a hang needs the 15 s reset); `echo s2idle > /sys/power/mem_sleep` gives up the
 standby saving for a wake that always works.
 
+The vendor's `CONFIG_QTI_PDC_SAVE_RESTORE` cannot be replicated on this port: its save reads the
+PDC enable banks from hardware at syscore suspend, and our equivalent read (moved to the pwrkey's
+`suspend_noirq`, on the assumption that the domain was still up) stalled the bus on the first
+battery deep suspend - neither the key nor the charger woke the tablet and it needed the 15 s
+reset.  Only the verified type write is kept (`nabu-platform` 2b66137).
+
 ### Charge pump auto-probe (2026-11-23)
 
 The pump is no longer manual-only.  It is probed once per plug session
